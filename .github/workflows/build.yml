@@ -1,0 +1,62 @@
+name: Build images
+
+# Published images come only from main, after review. Pull requests build to check; those from this repository also
+# write the registry build cache, so the publishing build after merge starts warm. Fork pull requests get no
+# credentials: they read the cache and publish nothing.
+on:
+  pull_request:
+    paths: ["recipes/**", ".github/workflows/**"]
+  push:
+    branches: [main]
+    paths: ["recipes/**", ".github/workflows/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check-fork:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [glm53-mia]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image.yml
+    with:
+      lane: ${{ matrix.lane }}
+
+  check:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [glm53-mia]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      lane: ${{ matrix.lane }}
+      write-cache: true
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [glm53-mia]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image.yml
+    with:
+      lane: ${{ matrix.lane }}
+      write-cache: true
+      publish: true
