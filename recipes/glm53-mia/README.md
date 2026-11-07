@@ -1,6 +1,6 @@
 # GLM-5.3-Flash on two DGX Sparks
 
-The engine is [`deploy/glm53`](https://github.com/kelchm/TensorFold/tree/deploy/glm53) in kelchm/TensorFold: TensorFold `f350cd3e` with [MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104](https://github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104) imported as commits (110 patches at `13f2464`, authors preserved, kit notices under `packaging/kits/`). It carries no changes of our own yet. [recipe.json](recipe.json) pins the exact engine commit, the kit, base images and toolchain, which the image build uses, and the weights and drafter revisions, which the build does not use: they are what a deployment of this image must load, and qualification receipts name them.
+The engine is [`deploy/glm53-mia`](https://github.com/kelchm/TensorFold/tree/deploy/glm53-mia) in kelchm/TensorFold: TensorFold `f350cd3e` with [MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104](https://github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104) imported as commits (110 patches at `13f2464`, authors preserved, kit notices under `packaging/kits/`). It carries no changes of our own yet. [recipe.json](recipe.json) pins the exact engine commit, the kit, base images and toolchain, which the image build uses, and the weights and drafter revisions, which the build does not use: they are what a deployment of this image must load, and qualification receipts name them.
 
 ## Intended settings
 
@@ -20,10 +20,10 @@ Import a new kit revision into a new branch with [tools/kit_import.py](../../too
 ```sh
 tools/kit_import.py --repo ../TensorFold --kit ../GLM-5.3-Flash-DGX-Sparks-1104 \
   --kit-repo MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 --base f350cd3ea253a042e205746928271f9d8f71a82d \
-  --branch check/glm53 --notices packaging/kits/glm-5.3-flash-dgx-sparks-1104 \
+  --branch check/glm53-mia --notices packaging/kits/glm-5.3-flash-dgx-sparks-1104 \
   --default-author 'MiaAI Lab <83042094+MiaAI-Lab@users.noreply.github.com>' \
   --series-sha256 287db8619735278d26139df314ddc01e938f70a09286224e528739772b2829fb
-git -C ../TensorFold rev-parse check/glm53   # e52eb42b52b1e50f3f23a5eae8115bbe80c5e7d9
+git -C ../TensorFold rev-parse check/glm53-mia   # e52eb42b52b1e50f3f23a5eae8115bbe80c5e7d9
 ```
 
-Commit SHAs include the committer, so `e52eb42b` reproduces only when `user.name` and `user.email` in the engine checkout are those `deploy/glm53` was imported with: Matthew Kelch <172301+kelchm@users.noreply.github.com>. Under any other identity, compare the tree (`git rev-parse check/glm53^{tree}`) and the authors instead.
+Commit SHAs include the committer, so `e52eb42b` reproduces only when `user.name` and `user.email` in the engine checkout are those `deploy/glm53-mia` was imported with: Matthew Kelch <172301+kelchm@users.noreply.github.com>. Under any other identity, compare the tree (`git rev-parse check/glm53-mia^{tree}`) and the authors instead.

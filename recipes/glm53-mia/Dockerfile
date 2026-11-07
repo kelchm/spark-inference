@@ -154,16 +154,16 @@ ARG PREFIX=/opt/tensorfold
 ARG TF_REPO=https://github.com/kelchm/TensorFold.git
 ARG TF_REF
 ARG RECIPE_COMMIT=unknown
-ARG RECIPE_MODEL=glm53
+ARG RECIPE_LANE
 ARG KIT_REPO
 ARG KIT_REV
 ARG KIT_SERIES_SHA256
 ARG SM=121
 ARG ZIG_VERSION=0.17.0
 ARG NCCL_MIN=2.30.0
-# The kit identity becomes labels below; an image without it would not say what it was built from.
-RUN [[ -n "${KIT_REPO}" && -n "${KIT_REV}" && -n "${KIT_SERIES_SHA256}" ]] \
-      || { echo "KIT_REPO, KIT_REV and KIT_SERIES_SHA256 are required (recipe.json kit.*)" >&2; exit 1; } \
+# The lane and kit identity become labels below; an image without them would not say what it was built from.
+RUN [[ -n "${RECIPE_LANE}" && -n "${KIT_REPO}" && -n "${KIT_REV}" && -n "${KIT_SERIES_SHA256}" ]] \
+      || { echo "RECIPE_LANE, KIT_REPO, KIT_REV and KIT_SERIES_SHA256 are required" >&2; exit 1; } \
  && apt-get update \
  && apt-get install -y --no-install-recommends libibverbs1 ibverbs-providers rdma-core python3 \
  && rm -rf /var/lib/apt/lists/*
@@ -200,8 +200,8 @@ LABEL org.opencontainers.image.source="https://github.com/kelchm/spark-inference
       org.opencontainers.image.revision="${RECIPE_COMMIT}" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="TensorFold native engine for GLM-5.3-Flash on DGX Spark" \
-      recipe.model="${RECIPE_MODEL}" \
-      recipe.path="models/${RECIPE_MODEL}/recipe.json" \
+      recipe.lane="${RECIPE_LANE}" \
+      recipe.path="recipes/${RECIPE_LANE}/recipe.json" \
       tf.repo="${TF_REPO}" \
       tf.ref="${TF_REF}" \
       tf.kit.repo="${KIT_REPO}" \

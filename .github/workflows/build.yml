@@ -5,10 +5,10 @@ name: Build images
 # credentials: they read the cache and publish nothing.
 on:
   pull_request:
-    paths: ["models/**", ".github/workflows/**"]
+    paths: ["recipes/**", ".github/workflows/**"]
   push:
     branches: [main]
-    paths: ["models/**", ".github/workflows/**"]
+    paths: ["recipes/**", ".github/workflows/**"]
   workflow_dispatch:
 
 permissions: {}
@@ -23,25 +23,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: [glm53]
+        lane: [glm53-mia]
     permissions:
       contents: read
     uses: ./.github/workflows/image.yml
     with:
-      model: ${{ matrix.model }}
+      lane: ${{ matrix.lane }}
 
   check:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
-        model: [glm53]
+        lane: [glm53-mia]
     permissions:
       contents: read
       packages: write
     uses: ./.github/workflows/image.yml
     with:
-      model: ${{ matrix.model }}
+      lane: ${{ matrix.lane }}
       write-cache: true
 
   publish:
@@ -49,7 +49,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        model: [glm53]
+        lane: [glm53-mia]
     permissions:
       contents: read
       packages: write
@@ -57,6 +57,6 @@ jobs:
       attestations: write
     uses: ./.github/workflows/image.yml
     with:
-      model: ${{ matrix.model }}
+      lane: ${{ matrix.lane }}
       write-cache: true
       publish: true

@@ -1,11 +1,11 @@
 name: Image
 
-# One model line's image, built from models/<model>/recipe.json on an ARM64 runner. The caller grants permissions:
+# One lane's image, built from recipes/<lane>/recipe.json on an ARM64 runner. The caller grants permissions:
 # read-only contents to build; packages to write the registry build cache; id-token and attestations to publish.
 on:
   workflow_call:
     inputs:
-      model:
+      lane:
         type: string
         required: true
       write-cache:
@@ -20,8 +20,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 300
     env:
-      IMAGE: ghcr.io/${{ github.repository }}/${{ inputs.model }}
-      RECIPE: models/${{ inputs.model }}/recipe.json
+      IMAGE: ghcr.io/${{ github.repository }}/${{ inputs.lane }}
+      RECIPE: recipes/${{ inputs.lane }}/recipe.json
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -58,8 +58,8 @@ jobs:
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: models/${{ inputs.model }}
-          file: models/${{ inputs.model }}/Dockerfile
+          context: recipes/${{ inputs.lane }}
+          file: recipes/${{ inputs.lane }}/Dockerfile
           platforms: linux/arm64
           push: ${{ inputs.publish }}
           # One tag per recipe commit, for finding a build; a rerun can repoint it. Deployments pin the digest.
@@ -70,7 +70,7 @@ jobs:
             TF_REPO=https://github.com/${{ steps.recipe.outputs.engine_repo }}.git
             TF_REF=${{ steps.recipe.outputs.engine_commit }}
             RECIPE_COMMIT=${{ github.sha }}
-            RECIPE_MODEL=${{ inputs.model }}
+            RECIPE_LANE=${{ inputs.lane }}
             KIT_REPO=${{ steps.recipe.outputs.kit_repo }}
             KIT_REV=${{ steps.recipe.outputs.kit_rev }}
             KIT_SERIES_SHA256=${{ steps.recipe.outputs.kit_series }}
@@ -83,7 +83,7 @@ jobs:
           # after merge reuses what the pull request compiled. The gha source only reads what earlier runs left.
           cache-from: |
             type=registry,ref=${{ env.IMAGE }}:buildcache
-            type=gha,scope=${{ inputs.model }}
+            type=gha,scope=${{ inputs.lane }}
           cache-to: ${{ inputs.write-cache && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
       - if: inputs.publish
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -98,7 +98,7 @@ jobs:
           PUBLISH: ${{ inputs.publish }}
         run: |
           {
-            echo "### ${{ inputs.model }}"
+            echo "### ${{ inputs.lane }}"
             echo "- Engine: \`$ENGINE\`"
             if [ "$PUBLISH" = true ]; then echo "- Image: \`$IMAGE@$DIGEST\`"; else echo "- Image: built, not published"; fi
             echo "- Built, not qualified: qualification on the Sparks is a separate step."
