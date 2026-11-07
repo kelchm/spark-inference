@@ -1,0 +1,9 @@
+spark-inference
+Copyright 2026 Matthew Kelch
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository adapts recipe material from other Apache-2.0 projects. Each adapted file names its source in its header and keeps the source's notices; the changes are described there.
+
+- MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 (https://github.com/MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104), Copyright 2026 Mia's AI Lab, Apache-2.0. models/glm53/Dockerfile is adapted from its docker/Dockerfile. The kit's engine patches are not copied here; they are imported as commits into kelchm/TensorFold, which carries the kit's LICENSE, NOTICE.md and CREDITS.md beside them.
+
+Images built from this repository contain TensorFold (https://github.com/ashhart/TensorFold, Apache-2.0, with earlier code under MIT) and the third-party components each Dockerfile lists. Their licence files are copied into each image under /opt/tensorfold/LICENSES.
