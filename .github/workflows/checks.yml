@@ -1,0 +1,54 @@
+name: Checks
+
+# Cheap checks on every change: recipes match the engine fork, release files match their recipes and images, and the
+# README's status table is current. Image builds are separate (build.yml).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  recipes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Recipes match the engine fork
+        run: python3 tools/check_recipe.py
+
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: README status table is current
+        run: python3 tools/status.py --check
+
+  releases:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Release files match their recipes and images
+        run: python3 tools/check_release.py
+      - name: Images carry this repository's build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s nullglob
+          for file in recipes/*/releases/*.json; do
+            image=$(jq -r .image "$file")
+            echo "$file: $image"
+            gh attestation verify "oci://$image" --repo "$GITHUB_REPOSITORY" --format json > /dev/null
+          done

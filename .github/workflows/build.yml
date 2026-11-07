@@ -4,11 +4,12 @@ name: Build images
 # write the registry build cache, so the publishing build after merge starts warm. Fork pull requests get no
 # credentials: they read the cache and publish nothing.
 on:
+  # A release only points at an image that already exists, so release files never trigger a build.
   pull_request:
-    paths: ["recipes/**", ".github/workflows/**"]
+    paths: ["recipes/**", "!recipes/*/releases/**", ".github/workflows/**"]
   push:
     branches: [main]
-    paths: ["recipes/**", ".github/workflows/**"]
+    paths: ["recipes/**", "!recipes/*/releases/**", ".github/workflows/**"]
   workflow_dispatch:
 
 permissions: {}
