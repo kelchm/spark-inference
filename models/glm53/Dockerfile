@@ -162,7 +162,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=nccl /opt/nccl/ /opt/nccl/
 COPY --from=build ${PREFIX}/ ${PREFIX}/
-# A wheel's libnccl replaces the base image's; then check that whatever is installed meets the engine's minimum.
+# A wheel's libnccl replaces the base image's; then every copy the loader could pick must meet the engine's minimum.
 RUN shopt -s nullglob \
  && if [[ -f /opt/nccl/libnccl.so.2 ]]; then \
       existing=$(find /usr/lib /lib -name 'libnccl.so.2' | head -1) \
@@ -173,18 +173,17 @@ RUN shopt -s nullglob \
       && echo "NCCL replaced from the wheel in ${dir}"; \
     fi \
  && rm -rf /opt/nccl \
- && so=$(find /usr/lib /lib -name 'libnccl.so.2*' | head -1) \
- && test -n "${so}" || { echo "no libnccl.so.2 in the runtime image: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; } \
- && ver=$( { grep -aoE '[0-9]+\.[0-9]+\.[0-9]+' "${so}" || true; } | { grep -xE '2\.[0-9]+\.[0-9]+' || true; } \
-           | sort -u -t. -k1,1n -k2,2n -k3,3n | tail -1 ) \
- && echo "libnccl: ${so} (${ver:-unknown}), engine minimum ${NCCL_MIN}" \
- && if [ -n "${ver}" ]; then \
+ && copies=$(find /usr/lib /lib /usr/local -name 'libnccl.so.2*' -type f) \
+ && test -n "${copies}" || { echo "no libnccl.so.2 in the runtime image: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; } \
+ && for so in ${copies}; do \
+      ver=$( { grep -aoE '[0-9]+\.[0-9]+\.[0-9]+' "${so}" || true; } | { grep -xE '2\.[0-9]+\.[0-9]+' || true; } \
+             | sort -u -t. -k1,1n -k2,2n -k3,3n | tail -1 ); \
+      echo "libnccl: ${so} (${ver:-unknown}), engine minimum ${NCCL_MIN}"; \
+      [[ -n "${ver}" ]] \
+        || { echo "libnccl: no version string in ${so}; the GLM path needs ${NCCL_MIN}+ and does not check at run time" >&2; exit 1; }; \
       printf '%s\n%s\n' "${NCCL_MIN}" "${ver}" | sort -C -t. -k1,1n -k2,2n -k3,3n \
-        || { echo "libnccl ${ver} is older than ${NCCL_MIN}: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; }; \
-    else \
-      echo "libnccl: could not read a version string; the GLM path needs ${NCCL_MIN} or newer and does not check at run time" >&2; \
-      exit 1; \
-    fi
+        || { echo "${so}: libnccl ${ver} is older than ${NCCL_MIN}: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; }; \
+    done
 # `tensorfold` is the server too, as upstream's packaging links it (its docs run `tensorfold serve`); the CUDA dev CLI
 # that a source install names bin/tensorfold is linked as `tensorfold-cuda`.
 RUN shopt -s nullglob \
