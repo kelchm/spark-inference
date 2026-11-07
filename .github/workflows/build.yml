@@ -1,10 +1,13 @@
 name: Build images
 
-# Build once: a pull request from this repository builds its exact head commit and publishes the image by digest,
-# so merging rebuilds nothing; a release pins that digest. Pull requests from forks build without credentials and
-# publish nothing. A manual run rebuilds the current main.
+# Published images come only from main, after review. Pull requests build to check; those from this repository also
+# write the registry build cache, so the publishing build after merge starts warm. Fork pull requests get no
+# credentials: they read the cache and publish nothing.
 on:
   pull_request:
+    paths: ["models/**", ".github/workflows/**"]
+  push:
+    branches: [main]
     paths: ["models/**", ".github/workflows/**"]
   workflow_dispatch:
 
@@ -12,10 +15,10 @@ permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
+  check-fork:
     if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
@@ -26,10 +29,23 @@ jobs:
     uses: ./.github/workflows/image.yml
     with:
       model: ${{ matrix.model }}
-      publish: false
+
+  check:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [glm53]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/image.yml
+    with:
+      model: ${{ matrix.model }}
+      write-cache: true
 
   publish:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -42,4 +58,5 @@ jobs:
     uses: ./.github/workflows/image.yml
     with:
       model: ${{ matrix.model }}
+      write-cache: true
       publish: true

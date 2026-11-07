@@ -21,7 +21,7 @@ Engine behaviour and its tests belong in the engine fork. Model and hardware qua
 
 ## Images
 
-Each model line builds once, on GitHub's ARM64 runners. A pull request from this repository builds its head commit and publishes it to `ghcr.io/kelchm/spark-inference/<model>` as `sha-<commit>`, with a build provenance attestation; merging rebuilds nothing. Pull requests from forks build without credentials and publish nothing. Build layers are cached in the registry (`<model>:buildcache`), so a build that leaves the engine unchanged takes minutes. Deployments pin images by digest, never by tag. A successful build proves only that the image builds; qualification on the Sparks is a separate step with its own receipts.
+Published images come only from CI on `main`, after review: each merge that changes a model line builds it on GitHub's ARM64 runners and publishes `ghcr.io/kelchm/spark-inference/<model>` as `sha-<commit>`, with a build provenance attestation. Pull requests build to check and publish nothing; those from this repository write the registry build cache (`<model>:buildcache`), so the build after merge reuses the compiled engine and takes minutes. Fork pull requests get no credentials. Deployments pin images by digest, never by tag. A successful build proves only that the image builds; qualification on the Sparks is a separate step with its own receipts. Local builds of the same Dockerfile are fine for development and testing, never for publishing.
 
 ## Licence
 
