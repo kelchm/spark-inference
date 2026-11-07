@@ -3,7 +3,7 @@
   "engine": {
     "repository": "kelchm/TensorFold",
     "branch": "deploy/glm53",
-    "commit": "0fd7107020f5fa139a677addd4e091afdc066f4b",
+    "commit": "e52eb42b52b1e50f3f23a5eae8115bbe80c5e7d9",
     "upstream": "ashhart/TensorFold@f350cd3ea253a042e205746928271f9d8f71a82d"
   },
   "kit": {

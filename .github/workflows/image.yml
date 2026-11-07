@@ -56,9 +56,10 @@ jobs:
           file: models/${{ inputs.model }}/Dockerfile
           platforms: linux/arm64
           push: ${{ inputs.publish }}
+          # The moving tag follows main only; deployments pin the digest either way.
           tags: |
             ${{ env.IMAGE }}:sha-${{ github.sha }}
-            ${{ env.IMAGE }}:main
+            ${{ github.ref == 'refs/heads/main' && format('{0}:main', env.IMAGE) || '' }}
           build-args: |
             BASE_IMAGE=${{ steps.recipe.outputs.base_image }}
             RUNTIME_IMAGE=${{ steps.recipe.outputs.runtime_image }}

@@ -182,7 +182,8 @@ RUN shopt -s nullglob \
       printf '%s\n%s\n' "${NCCL_MIN}" "${ver}" | sort -C -t. -k1,1n -k2,2n -k3,3n \
         || { echo "libnccl ${ver} is older than ${NCCL_MIN}: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; }; \
     else \
-      echo "libnccl: could not read a version string; the GLM path needs ${NCCL_MIN} or newer (it does not check at run time)" >&2; \
+      echo "libnccl: could not read a version string; the GLM path needs ${NCCL_MIN} or newer and does not check at run time" >&2; \
+      exit 1; \
     fi
 # `tensorfold` is the server too, as upstream's packaging links it (its docs run `tensorfold serve`); the CUDA dev CLI
 # that a source install names bin/tensorfold is linked as `tensorfold-cuda`.
