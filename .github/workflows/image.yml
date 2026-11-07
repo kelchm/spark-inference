@@ -29,6 +29,9 @@ jobs:
           {
             echo "engine_repo=$(jq -r .engine.repository "$RECIPE")"
             echo "engine_commit=$(jq -r .engine.commit "$RECIPE")"
+            echo "kit_repo=$(jq -r .kit.repository "$RECIPE")"
+            echo "kit_rev=$(jq -r .kit.revision "$RECIPE")"
+            echo "kit_series=$(jq -r .kit.patches_sha256 "$RECIPE")"
             echo "base_image=$(jq -r .build.base_image "$RECIPE")"
             echo "runtime_image=$(jq -r .build.runtime_image "$RECIPE")"
             echo "zig_version=$(jq -r .build.zig_version "$RECIPE")"
@@ -64,6 +67,10 @@ jobs:
             TF_REPO=https://github.com/${{ steps.recipe.outputs.engine_repo }}.git
             TF_REF=${{ steps.recipe.outputs.engine_commit }}
             RECIPE_COMMIT=${{ github.sha }}
+            RECIPE_MODEL=${{ inputs.model }}
+            KIT_REPO=${{ steps.recipe.outputs.kit_repo }}
+            KIT_REV=${{ steps.recipe.outputs.kit_rev }}
+            KIT_SERIES_SHA256=${{ steps.recipe.outputs.kit_series }}
             ZIG_VERSION=${{ steps.recipe.outputs.zig_version }}
             ZIG_SHA256=${{ steps.recipe.outputs.zig_sha256 }}
             ZIG_CPU=${{ steps.recipe.outputs.zig_cpu }}

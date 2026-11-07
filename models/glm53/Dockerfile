@@ -154,6 +154,10 @@ ARG PREFIX=/opt/tensorfold
 ARG TF_REPO=https://github.com/kelchm/TensorFold.git
 ARG TF_REF
 ARG RECIPE_COMMIT=unknown
+ARG RECIPE_MODEL=glm53
+ARG KIT_REPO
+ARG KIT_REV
+ARG KIT_SERIES_SHA256
 ARG SM=121
 ARG ZIG_VERSION=0.17.0
 ARG NCCL_MIN=2.30.0
@@ -193,8 +197,13 @@ LABEL org.opencontainers.image.source="https://github.com/kelchm/spark-inference
       org.opencontainers.image.revision="${RECIPE_COMMIT}" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="TensorFold native engine for GLM-5.3-Flash on DGX Spark" \
+      recipe.model="${RECIPE_MODEL}" \
+      recipe.path="models/${RECIPE_MODEL}/recipe.json" \
       tf.repo="${TF_REPO}" \
       tf.ref="${TF_REF}" \
+      tf.kit.repo="${KIT_REPO}" \
+      tf.kit.rev="${KIT_REV}" \
+      tf.kit.series_sha256="${KIT_SERIES_SHA256}" \
       tf.engine="zig" \
       tf.sm="${SM}" \
       tf.zig="${ZIG_VERSION}"
