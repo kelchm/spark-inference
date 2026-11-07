@@ -1,7 +1,9 @@
 name: Image
 
 # One model line's image, built from models/<model>/recipe.json on an ARM64 runner. The caller grants permissions:
-# pull requests get read-only contents and never publish; publishing callers add packages, id-token and attestations.
+# fork pull requests get read-only contents and never publish; publishing callers add packages, id-token and
+# attestations. A pull request builds its head commit, not the merge preview, so the image and its labels, tag and
+# attestation all name a commit that exists in the repository.
 on:
   workflow_call:
     inputs:
@@ -19,9 +21,11 @@ jobs:
     env:
       IMAGE: ghcr.io/${{ github.repository }}/${{ inputs.model }}
       RECIPE: models/${{ inputs.model }}/recipe.json
+      COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: ${{ env.COMMIT }}
           persist-credentials: false
       - name: Read the recipe
         id: recipe
@@ -60,13 +64,13 @@ jobs:
           platforms: linux/arm64
           push: ${{ inputs.publish }}
           # One tag per recipe commit, for finding a build; a rerun can repoint it. Deployments pin the digest.
-          tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          tags: ${{ env.IMAGE }}:sha-${{ env.COMMIT }}
           build-args: |
             BASE_IMAGE=${{ steps.recipe.outputs.base_image }}
             RUNTIME_IMAGE=${{ steps.recipe.outputs.runtime_image }}
             TF_REPO=https://github.com/${{ steps.recipe.outputs.engine_repo }}.git
             TF_REF=${{ steps.recipe.outputs.engine_commit }}
-            RECIPE_COMMIT=${{ github.sha }}
+            RECIPE_COMMIT=${{ env.COMMIT }}
             RECIPE_MODEL=${{ inputs.model }}
             KIT_REPO=${{ steps.recipe.outputs.kit_repo }}
             KIT_REV=${{ steps.recipe.outputs.kit_rev }}
@@ -75,11 +79,13 @@ jobs:
             ZIG_SHA256=${{ steps.recipe.outputs.zig_sha256 }}
             ZIG_CPU=${{ steps.recipe.outputs.zig_cpu }}
             SM=${{ steps.recipe.outputs.sm }}
-          # Every run saves its layers: the engine compile (~20 min) depends only on the engine commit, toolchain and
-          # build arguments, so later runs that change labels or the runtime stage reuse it. A pull request's cache is
-          # scoped to that pull request and cannot change what main builds.
-          cache-from: type=gha,scope=${{ inputs.model }}
-          cache-to: type=gha,scope=${{ inputs.model }},mode=max
+          # The engine compile (~20 min) depends only on the engine commit, toolchain and build arguments, so its layers
+          # are cached in the registry beside the image: every build starts from the last published one, whatever the
+          # branch, with no Actions cache size limit. Publishing builds write it; fork builds only read it.
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE }}:buildcache
+            type=gha,scope=${{ inputs.model }}
+          cache-to: ${{ inputs.publish && format('type=registry,ref={0}:buildcache,mode=max', env.IMAGE) || '' }}
       - if: inputs.publish
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
