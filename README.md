@@ -33,6 +33,7 @@ Deployments pin a release, and a release pins an image digest; tags are only for
 
 - `recipes/<lane>/recipe.json`: the pins for one lane (engine repository and commit, kit, base images, toolchain, weights).
 - `recipes/<lane>/Dockerfile`: builds that lane's image from its pinned engine commit.
+- `recipes/<lane>/releases/<release>.json`: a promoted build. It pins one published image by digest, repeats the recipe pins of the commit that built it, says what changed, and records qualification (`pending`, `qualified` or `rejected`). Deployments pin a release file. `tools/check_release.py` and the Releases workflow check every release against its recipe commit, the image's labels and its build provenance; release files never trigger a build.
 - `tools/`: maintenance tools, such as importing a kit's patch series into the engine fork.
 - `.github/workflows/`: one reusable image build, called for each lane. Lint with `mise exec -- actionlint`; `mise.toml` pins the tools.
 
