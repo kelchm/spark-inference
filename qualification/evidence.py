@@ -467,7 +467,8 @@ class Verdict:
                 out['reasons'].append(f'server identity after the {kind}: {ident}')
                 status = worst(status, ident)
             stores = [x for x in self.lines if x['kind'] == 'store' and p_end < x['ts'] <= c_start + self.skew]
-            good = [x for x in stores if x['groups'][0] == self.c.manifest['profile']['learn_dir'] and
+            good = [x for x in stores if re.fullmatch(re.escape(self.c.manifest['profile']['learn_dir']) +
+                                                     r'/[0-9a-f]{16}', x['groups'][0]) and
                     int(x['groups'][4]) == self.c.manifest['ranks'] and int(x['groups'][1]) >= 1]
             out['store_opened'] = [x['line'] for x in stores]
             if not good:

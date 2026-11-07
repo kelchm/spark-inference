@@ -397,7 +397,7 @@ def server_log(root, *, reads=True, saves=True, skip=False, image_short=False, s
                           f'info: imprint: read {n} tokens from disk (80 MiB in 30 ms)'))
     for r in receipts:
         if r['kind'] == 'lifecycle' and r['event'] in ('restart', 'crash') and store:
-            lines.append((evidence.when(r['at']), f"info: glm: conversation states on disk in {LEARN} (4 states, "
+            lines.append((evidence.when(r['at']), f"info: glm: conversation states on disk in {LEARN}/0123456789abcdef (4 states, "
                                                   f"300 MiB of 65536 MiB; 2 ranks' parts)"))
     return ''.join(f'{stamp(ts)} {text}\n' for ts, text in sorted(lines))
 
