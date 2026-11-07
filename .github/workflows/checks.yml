@@ -1,19 +1,38 @@
-name: Releases
+name: Checks
 
-# A release file must match its recipe commit and pin a public image whose labels and build provenance agree.
+# Cheap checks on every change: recipes match the engine fork, release files match their recipes and images, and the
+# README's status table is current. Image builds are separate (build.yml).
 on:
   pull_request:
-    paths: ["recipes/*/releases/**", "tools/check_release.py", ".github/workflows/releases.yml"]
   push:
     branches: [main]
-    paths: ["recipes/*/releases/**", "tools/check_release.py", ".github/workflows/releases.yml"]
 
 permissions:
   contents: read
   attestations: read
 
 jobs:
-  check:
+  recipes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Recipes match the engine fork
+        run: python3 tools/check_recipe.py
+
+  status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: README status table is current
+        run: python3 tools/status.py --check
+
+  releases:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -3,7 +3,9 @@
 
 A release file is recipes/<lane>/releases/<lane>-<YYYY.MM.DD>[.n].json, .n numbering a second release that day. It must name an existing recipe commit, repeat
 that commit's recipe.json pins exactly, and pin an image digest whose labels record the same lane, recipe commit,
-engine commit and kit. Run from a full clone; the registry is read anonymously, so the image must be public.
+engine commit and kit. Its engine commit must be tagged release/<release> in the engine fork, so it stays reachable
+when the lane's deploy branch is re-imported. Run from a full clone; the registry is read anonymously, so the image
+must be public.
 Provenance is checked separately with `gh attestation verify`.
 """
 import json
@@ -13,7 +15,7 @@ import subprocess
 import sys
 import urllib.request
 
-PINNED = ('model', 'engine', 'kit', 'build', 'weights', 'drafter')
+PINNED = ('model', 'engine', 'kit', 'carries', 'build', 'weights', 'drafter')
 IMAGE = re.compile(r'ghcr\.io/(?P<repo>[a-z0-9._/-]+)@(?P<digest>sha256:[0-9a-f]{64})')
 CONFIG_TYPES = 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, ' \
     'application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
@@ -39,6 +41,14 @@ def labels(repo, digest):
         manifest = registry(f"{repo}/manifests/{arm[0]['digest']}", token)
     config = registry(f"{repo}/blobs/{manifest['config']['digest']}", token, accept='*/*')
     return config.get('config', {}).get('Labels') or {}
+
+
+def fork_tag(repository, name):
+    """The commit the engine fork's release/<name> tag points at, peeling an annotated tag; None if absent."""
+    out = subprocess.run(['git', 'ls-remote', f'https://github.com/{repository}.git', f'refs/tags/release/{name}*'],
+                         capture_output=True, text=True, check=True).stdout.split('\n')
+    refs = dict(reversed(line.split('\t')) for line in out if line)
+    return refs.get(f'refs/tags/release/{name}^{{}}') or refs.get(f'refs/tags/release/{name}')
 
 
 def check(path):
@@ -69,6 +79,10 @@ def check(path):
                 'tf.kit.rev': release['kit']['revision'],
                 'tf.kit.series_sha256': release['kit']['patches_sha256']}
         problems += [f'image label {k} is {found.get(k)!r}, expected {v!r}' for k, v in want.items() if found.get(k) != v]
+        tagged = fork_tag(release['engine']['repository'], release['release'])
+        if tagged != release['engine']['commit']:
+            problems.append(f"release/{release['release']} in {release['engine']['repository']} is {tagged}, expected "
+                            f"the engine commit {release['engine']['commit']}")
     qualification = release.get('qualification')
     if not isinstance(qualification, dict) or qualification.get('status') not in ('pending', 'qualified', 'rejected'):
         problems.append('qualification.status must be pending, qualified or rejected')
