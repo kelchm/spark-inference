@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check release files against the recipe they name and the image they pin.
 
-A release file is recipes/<lane>/releases/<lane>-<YYYY.MM.DD>.json. It must name an existing recipe commit, repeat
+A release file is recipes/<lane>/releases/<lane>-<YYYY.MM.DD>[.n].json, .n numbering a second release that day. It must name an existing recipe commit, repeat
 that commit's recipe.json pins exactly, and pin an image digest whose labels record the same lane, recipe commit,
 engine commit and kit. Run from a full clone; the registry is read anonymously, so the image must be public.
 Provenance is checked separately with `gh attestation verify`.
@@ -64,10 +64,13 @@ def check(path):
     elif not problems:
         found = labels(image['repo'], image['digest'])
         want = {'recipe.lane': lane, 'org.opencontainers.image.revision': commit,
-                'tf.ref': release['engine']['commit'], 'tf.kit.rev': release['kit']['revision'],
+                'tf.repo': f"https://github.com/{release['engine']['repository']}.git",
+                'tf.ref': release['engine']['commit'], 'tf.kit.repo': release['kit']['repository'],
+                'tf.kit.rev': release['kit']['revision'],
                 'tf.kit.series_sha256': release['kit']['patches_sha256']}
         problems += [f'image label {k} is {found.get(k)!r}, expected {v!r}' for k, v in want.items() if found.get(k) != v]
-    if release.get('qualification', {}).get('status') not in ('pending', 'qualified', 'rejected'):
+    qualification = release.get('qualification')
+    if not isinstance(qualification, dict) or qualification.get('status') not in ('pending', 'qualified', 'rejected'):
         problems.append('qualification.status must be pending, qualified or rejected')
     return problems
 

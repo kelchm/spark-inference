@@ -24,7 +24,7 @@ A **lane** is one maintained way of serving a model: `<model>-<recipe line>`, wh
 | Recipe | `recipes/<lane>/` | `recipes/glm53-mia/` |
 | Image | `ghcr.io/kelchm/spark-inference/<lane>` | `ghcr.io/kelchm/spark-inference/glm53-mia` |
 | Image tag | `sha-<commit>` from `main` | `glm53-mia:sha-…` |
-| Release | `<lane>-<YYYY.MM.DD>`, a file in `recipes/<lane>/releases/` | `glm53-mia-2026.11.07` |
+| Release | `<lane>-<YYYY.MM.DD>`, with `.2`, `.3`… for further releases that day; a file in `recipes/<lane>/releases/` | `glm53-mia-2026.11.07` |
 | Deployment profile (home-lab) | `<release>-<serving profile>` | `glm53-mia-2026.11.07-agent-1m` |
 
 Deployments pin a release, and a release pins an image digest; tags are only for finding builds.
