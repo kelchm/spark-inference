@@ -26,4 +26,4 @@ tools/kit_import.py --repo ../TensorFold --kit ../GLM-5.3-Flash-DGX-Sparks-1104 
 git -C ../TensorFold rev-parse check/glm53   # e52eb42b52b1e50f3f23a5eae8115bbe80c5e7d9
 ```
 
-The committer is whoever runs it; `deploy/glm53` was imported as Matthew Kelch <172301+kelchm@users.noreply.github.com>.
+Commit SHAs include the committer, so `e52eb42b` reproduces only when `user.name` and `user.email` in the engine checkout are those `deploy/glm53` was imported with: Matthew Kelch <172301+kelchm@users.noreply.github.com>. Under any other identity, compare the tree (`git rev-parse check/glm53^{tree}`) and the authors instead.

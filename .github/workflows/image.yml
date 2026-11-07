@@ -95,6 +95,6 @@ jobs:
           {
             echo "### ${{ inputs.model }}"
             echo "- Engine: \`$ENGINE\`"
-            echo "- Image: \`$IMAGE@$DIGEST\` (published: $PUBLISH)"
+            if [ "$PUBLISH" = true ]; then echo "- Image: \`$IMAGE@$DIGEST\`"; else echo "- Image: built, not published"; fi
             echo "- Built, not qualified: qualification on the Sparks is a separate step."
           } >> "$GITHUB_STEP_SUMMARY"

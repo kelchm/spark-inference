@@ -185,8 +185,8 @@ RUN shopt -s nullglob \
  && ver=$(python3 -c 'import ctypes; v = ctypes.c_int(); rc = ctypes.CDLL("libnccl.so.2").ncclGetVersion(ctypes.byref(v)); print(v.value if rc == 0 else -1)') \
  && min=$(awk -F. '{ print $1 * 10000 + $2 * 100 + $3 }' <<< "${NCCL_MIN}") \
  && echo "libnccl.so.2 as the loader resolves it: ncclGetVersion ${ver}, engine minimum ${NCCL_MIN} (${min})" \
- && test "${ver}" -ge "${min}" \
-   || { echo "libnccl is older than ${NCCL_MIN} or unreadable: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; }
+ && { test "${ver}" -ge "${min}" \
+      || { echo "libnccl is older than ${NCCL_MIN} or unreadable: pass --build-arg NCCL_WHEEL=<version>" >&2; exit 1; }; }
 # `tensorfold` is the server too, as upstream's packaging links it (its docs run `tensorfold serve`); the CUDA dev CLI
 # that a source install names bin/tensorfold is linked as `tensorfold-cuda`.
 RUN shopt -s nullglob \

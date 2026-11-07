@@ -143,6 +143,10 @@ def main():
     parser.add_argument('--default-author', required=True, help='"Name <email>" for patches without a From: line')
     parser.add_argument('--series-sha256', help='refuse unless the patch series has this digest')
     args = parser.parse_args()
+    # Inherited repository locations would let git ignore cwd and act on another repository.
+    for var in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY',
+                'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_PREFIX'):
+        os.environ.pop(var, None)
     repo, kit = args.repo.resolve(), args.kit.resolve()
     global KIT_DATE
     rev = run('git', 'rev-parse', 'HEAD', cwd=kit, capture=True).strip()
