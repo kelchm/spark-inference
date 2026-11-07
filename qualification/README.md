@@ -31,7 +31,7 @@ All text comes from SHA-256 of the seed, so it is identical on every machine and
 
 - **ledger**: filler prose in chunks of about 880 words, each with one planted fact (`the archive code for vault L0417 is KESTREL-4821-AQB`); codes are unique by construction. `first` is fitted to at least 300,000 measured tokens, `grow-1` to `grow-3` to 450k, 600k and 800k, and `grow-4` fills to the ceiling less the margin (default 24,576, which leaves room for three continuations) and must measure at least `near_floor` (default 980,000). Each turn asks about the first fact and two it just added.
 - **evictor**: a separate ledger of at least 600,000 tokens, sent to push the ledger out of GPU memory before an eviction probe.
-- **image**: four 224×224 PNGs, each four quadrants of distinct named colors from a fixed palette. The verdict decodes the images in the recorded request and checks their colors pixel by pixel, so the expected answers are known mechanically.
+- **image / image-fork**: four 224×224 PNGs, each four quadrants of distinct named colors from a fixed palette. The fork keeps the text, dimensions and positions identical but rotates the colors. Run both before and after restart to expose image-identity aliasing. The verdict decodes the recorded pixels, so expected answers are mechanically known.
 - **pi**: a Pi-shaped tool exchange. `call` must produce a `read_ledger` call; `result` replays that assistant message with its `reasoning_content` and the server's original call IDs exactly, plus the tool result, and must answer with the value only the tool supplied.
 - Continuations (`turn --continue`) add one question to the ledger, image or pi conversation after a lifecycle event.
 
@@ -50,10 +50,10 @@ python3 -m qualification prepare --out <campaign> \
 In the approved window, with no other traffic on the server, and with `E=--campaign <campaign> --endpoint http://<rank0>:8888`:
 
 1. Home-lab starts the server. `record-lifecycle --campaign <campaign> --event start --identity <rank0 docker inspect>`, then `server $E`.
-2. Long context: `turn $E --session ledger` five times (`first` and `grow-1` … `grow-4`).
-3. `turn $E --session image`, then `turn $E --session pi` twice.
+2. Long context: `turn $E --session ledger` five times (`first` and `grow-1` … `grow-4`). Wait for the first ≥300K published-save receipt before sending the next turn; a later save cannot substitute for the first save.
+3. `turn $E --session image`, `turn $E --session image-fork`, then `turn $E --session pi` twice.
 4. Capture the rank 0 log with timestamps (`docker logs --timestamps …`) and `import-log` it. Home-lab restarts the server. `record-lifecycle --event restart --identity <new rank0 docker inspect>`.
-5. For each of `ledger`, `image` and `pi`: `imprint $E --session <s>`, then `turn $E --session <s> --continue`.
+5. For each of `ledger`, `image`, `image-fork` and `pi`: `imprint $E --session <s>`, then `turn $E --session <s> --continue`. Leave more than twice the clock-skew allowance between small probes (over four seconds at the default); ambiguous read lines prove neither probe.
 6. Eviction: `turn $E --session evictor`, `record-lifecycle --event eviction`, `imprint $E --session ledger`, `turn $E --session ledger --continue`.
 7. Crash: capture and import the log, home-lab kills rank 0 and brings the server back, `record-lifecycle --event crash --identity <rank0 docker inspect>`, then `imprint` and `turn --continue` for `ledger`.
 8. Capture and import the final rank 0 log, then `verdict --campaign <campaign> --output <campaign>/verdict.json`.
@@ -69,9 +69,11 @@ The verdict re-parses every reply from its wire bytes, regenerates every request
 - **Required probes**: ledger after restart, crash and eviction; image after restart; pi after restart.
 - **Identity**: every `start`, `restart` and `crash` record names the release digest, and `/tokenize` reports `max_model_len` 1,048,576.
 
-`qualification` is the worst of workload, every required probe and identity (`fail` over `unknown` over `pass`). A `pass` means the receipts support recording the release as `qualified`; recording it is a separate pull request, following "Record qualification" in [AGENTS.md](../AGENTS.md), with the campaign and its verdict as the receipt. A workload pass alone is not qualification.
+`qualification` summarizes only the automated workload, first-save, required resume probes and identity (`fail` over `unknown` over `pass`). Even a pass leaves `production=pending_manual_review`. It does not establish four-stream capacity, a verified mid-write crash, quota pressure, real Pi behavior or successful Python rollback. Review those separate home-lab receipts before following "Record qualification" in [AGENTS.md](../AGENTS.md). A lifecycle note alone is not proof of those operations.
 
 If images are not reused from disk after a restart, the image probe fails and the release stays production-rejected, whatever else passed.
+
+A separate `large_first_save` result requires a matching published save for the first measured ≥300K ledger prompt before the next chat. Missing evidence remains unknown; a skipped first save fails.
 
 ## Limits
 

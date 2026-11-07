@@ -392,7 +392,8 @@ def server_log(root, *, reads=True, saves=True, skip=False, image_short=False, s
             n = prior['measured_prompt_tokens']
             if r['session'] == 'image' and image_short:
                 n = 2000  # a read that stops before the images
-            lines.append((evidence.when(r['started_at']) + timedelta(milliseconds=1),
+            start, finish = evidence.when(r['started_at']), evidence.when(r['ended_at'])
+            lines.append((start + (finish - start) / 2,
                           f'info: imprint: read {n} tokens from disk (80 MiB in 30 ms)'))
     for r in receipts:
         if r['kind'] == 'lifecycle' and r['event'] in ('restart', 'crash') and store:
@@ -422,11 +423,12 @@ class CampaignTest(unittest.TestCase):
             for _ in workload.BASE_STEPS['ledger']:
                 online('turn', '--session', 'ledger')
             online('turn', '--session', 'image')
+            online('turn', '--session', 'image-fork')
             online('turn', '--session', 'pi')
             online('turn', '--session', 'pi')
             cli('record-lifecycle', '--campaign', cls.root, '--event', 'restart', '--identity', cls.identity)
             online('imprint', '--session', 'ledger')
-            for session in ('ledger', 'image', 'pi'):
+            for session in ('ledger', 'image', 'image-fork', 'pi'):
                 online('turn', '--session', session, '--continue')
             online('turn', '--session', 'evictor')
             cli('record-lifecycle', '--campaign', cls.root, '--event', 'eviction')
@@ -450,7 +452,13 @@ class CampaignTest(unittest.TestCase):
         return root
 
     def judge(self, root):
-        return evidence.verdict(root)
+        # Both clocks in the loopback fixture are the same workstation clock.
+        return evidence.verdict(root, skew_s=0)
+
+    def test_ambiguous_adjacent_image_reads_cannot_be_credited_twice(self):
+        result = evidence.verdict(self.variant(), skew_s=2)
+        self.assertNotEqual(result['durability']['required']['image/restart'], 'pass')
+        self.assertNotEqual(result['durability']['required']['image-fork/restart'], 'pass')
 
     def test_targets_were_measured_not_estimated(self):
         steps = {(t['session'], t['step']): t for t in self.judge(self.variant())['workload']['steps']}
@@ -464,10 +472,54 @@ class CampaignTest(unittest.TestCase):
         self.assertEqual(result['problems'], [])
         self.assertEqual(result['workload']['status'], 'pass', result['workload'])
         self.assertEqual(result['durability']['required'], {
-            'ledger/restart': 'pass', 'ledger/crash': 'pass', 'image/restart': 'pass', 'pi/restart': 'pass',
+            'ledger/restart': 'pass', 'ledger/crash': 'pass', 'image/restart': 'pass',
+            'image-fork/restart': 'pass', 'pi/restart': 'pass',
             'ledger/eviction': 'pass'})
         self.assertEqual(result['identity']['status'], 'pass')
-        self.assertEqual((result['qualification'], result['production']), ('pass', 'eligible'))
+        self.assertEqual((result['qualification'], result['production']), ('pass', 'pending_manual_review'))
+        self.assertEqual(result['large_first_save']['status'], 'pass')
+        self.assertTrue(result['manual_gates'])
+
+    def test_later_large_saves_cannot_substitute_for_the_first_save(self):
+        root = self.variant(none=True)
+        text = server_log(root)
+        first = next(r for r in evidence.Campaign(root).receipts()
+                     if r['kind'] == 'chat' and r['session'] == 'ledger' and r['step'] == 'first')
+        n = first['measured_prompt_tokens']
+        text = '\n'.join(line for line in text.splitlines() if f'imprint: {n} tokens on disk:' not in line)
+        log = root.parent / 'no-first-save.log'
+        log.write_text(text)
+        cli('import-log', '--campaign', root, '--file', log)
+        result = self.judge(root)
+        self.assertEqual(result['large_first_save']['status'], 'unknown')
+        self.assertEqual(result['qualification'], 'unknown')
+
+    def test_image_fork_has_identical_text_but_different_pixels_and_answers(self):
+        c = evidence.Campaign(self.root)
+        turns = {r['session']: c.parsed(r, 'request', transport.strict_json)
+                 for r in c.receipts() if r['kind'] == 'chat' and r['step'] == 'first'
+                 and r['session'] in ('image', 'image-fork')}
+        first, fork = turns['image'], turns['image-fork']
+        self.assertEqual(first['messages'][0], fork['messages'][0])
+        a, b = first['messages'][1]['content'], fork['messages'][1]['content']
+        self.assertEqual([x for x in a if x['type'] == 'text'], [x for x in b if x['type'] == 'text'])
+        self.assertNotEqual([x for x in a if x['type'] == 'image_url'], [x for x in b if x['type'] == 'image_url'])
+
+    def test_aliased_image_fork_response_fails_even_with_disk_reads(self):
+        root = self.variant()
+        c = evidence.Campaign(root)
+        first = next(r for r in c.receipts() if r['kind'] == 'chat' and r['session'] == 'image'
+                     and r['step'] == 'first')
+        fork_path = next((root / 'receipts').glob('*-chat-image-fork-first.json'))
+        record = json.loads(fork_path.read_text())
+        raw = c.sidecar(first, 'response')
+        side = root / 'receipts' / record['sidecars']['response']['file']
+        side.write_bytes(gzip.compress(raw))
+        record['sidecars']['response'].update(sha256=transport.sha256(raw), bytes=len(raw))
+        fork_path.write_text(json.dumps(record))
+        result = self.judge(root)
+        self.assertEqual(result['workload']['status'], 'fail')
+        self.assertEqual(result['production'], 'rejected')
 
     def test_correct_answers_from_a_cold_prefill_do_not_pass(self):
         result = self.judge(self.variant(reads=False))
@@ -512,6 +564,14 @@ class CampaignTest(unittest.TestCase):
         sidecar = next((root / 'receipts').glob('*-chat-ledger-first.response.gz'))
         sidecar.write_bytes(gzip.compress(gzip.decompress(sidecar.read_bytes()).replace(b'Q1=', b'Q1=X')))
         self.assertEqual(self.judge(root)['qualification'], 'invalid')
+
+    def test_changed_harness_invalidates_verdict_and_blocks_endpoint_commands(self):
+        root = self.variant()
+        with mock.patch.object(evidence, 'harness_sha256', return_value='changed'):
+            self.assertEqual(self.judge(root)['qualification'], 'invalid')
+            with mock.patch.object(socket.socket, 'connect', side_effect=AssertionError('network used')):
+                with self.assertRaisesRegex(ValueError, 'harness changed'):
+                    cli('server', '--campaign', root, '--endpoint', 'http://127.0.0.1:1')
 
     def rewrite_request(self, root, pattern, change):
         path = next((root / 'receipts').glob(pattern))
@@ -567,7 +627,9 @@ class FailureCampaignTest(unittest.TestCase):
     def test_wrong_answer_fails_even_if_a_receipt_claims_correct(self):
         self.fake.mode = 'wrong'
         with Loopback(self.fake.respond) as server:
-            self.assertIn('NOT correct', self.turn(server.url))
+            with self.assertRaises(SystemExit) as result:
+                self.turn(server.url)
+            self.assertEqual(result.exception.code, 1)
         path = next((self.root / 'receipts').glob('*-chat-image-first.json'))
         record = json.loads(path.read_text())
         record['client_observed']['correct'] = True

@@ -1,0 +1,20 @@
+{
+  "schema": "spark-inference-runtime/v1",
+  "lane": "glm53-mia",
+  "template_origin": {
+    "repository": "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104",
+    "revision": "13f2464ee84ab2b5dabf0bb264d1144b02cf5fb7",
+    "path": "templates/glm-5.3-flash-vision.jinja",
+    "sha256": "15ff929998c3dd126addaa1448f7f811bb3724fe835f448ac889d8f558d034c8",
+    "effort_line": "thinking"
+  },
+  "files": {
+    "capacity.py": "dbb53fa620a5b8d12daa49e8e1ad3bb4153d8fd29ba41eb05343f4a20e7639e8",
+    "chat_template.jinja": "f2e36c6b7fdd89f5f61564635227a1708e1601357cd41f9b5c0190911573d1e2",
+    "readiness.py": "4f75d957e8f7779b251521ebf3ce7ae62bd40c24ac30c675a5ed53e9d3cda41b",
+    "run.sh": "43427da568b4338c14cc5303b339989731d8d700b53dfb5de0c478eaa9a970fe",
+    "serve.py": "9564069a872e94ce1a28d3a309985bfbad2e4ee2bb579dbd98a197c58584bb96",
+    "upstream_chat_template.jinja": "15ff929998c3dd126addaa1448f7f811bb3724fe835f448ac889d8f558d034c8",
+    "verify.py": "93de9a3a84dc610a1f51b0c82d6a15da7fb929eade194634f3961591b246bff7"
+  }
+}

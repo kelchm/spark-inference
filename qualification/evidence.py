@@ -18,7 +18,7 @@ from .transport import canonical, parse_sse, sha256, strict_json
 
 SCHEMA = 'glm53-qualification/1'
 REQUIRED_PROBES = (('ledger', 'restart'), ('ledger', 'crash'), ('ledger', 'eviction'), ('image', 'restart'),
-                   ('pi', 'restart'))
+                   ('image-fork', 'restart'), ('pi', 'restart'))
 EVENTS = ('start', 'restart', 'crash', 'eviction')
 TIMESTAMP = re.compile(r'^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)\s')
 SAVE = re.compile(r'imprint: (\d+) tokens on disk: (\d+) new blocks')
@@ -66,6 +66,10 @@ class Campaign:
                 raise ValueError(f'{path.name}: seq does not match its file name')
             out.append(record)
         return out
+
+    def require_current_harness(self):
+        if harness_sha256() != self.manifest['harness_sha256']:
+            raise ValueError('harness changed since prepare; prepare a new campaign before endpoint operations')
 
     def write(self, kind, label, record, sidecars=None):
         """A new receipt, created exclusively; sidecars are gzipped wire bytes hashed before compression."""
@@ -167,6 +171,7 @@ class Verdict:
         self.skew = timedelta(seconds=skew_s)
         self.tolerance = tolerance
         self.problems = []
+        self.ambiguous_reads = set()
 
     def run(self):
         c = self.c
@@ -176,6 +181,8 @@ class Verdict:
             return self.report({'problems': [str(error)]})
         if sha256(c.plan_bytes) != c.manifest['plan_sha256']:
             self.problems.append('plan.json does not match the manifest')
+        if harness_sha256() != c.manifest['harness_sha256']:
+            self.problems.append('harness changed since the campaign was prepared')
         for r in receipts:
             if r.get('schema') != SCHEMA or r.get('manifest_sha256') != c.manifest_sha256:
                 self.problems.append(f'receipt {r["seq"]} belongs to another manifest')
@@ -214,9 +221,10 @@ class Verdict:
             found = [x['status'] for x in probes if x['session'] == session and x['event'] == event]
             durability[f'{session}/{event}'] = worst(*found) if found else 'unknown'
         identity = self.identity()
-        qualification = worst(workload_status, *durability.values(), identity['status'])
-        image = durability['image/restart']
-        production = {'fail': 'rejected', 'pass': 'eligible'}.get(qualification, 'unknown')
+        first_save = self.first_save()
+        qualification = worst(workload_status, *durability.values(), identity['status'], first_save['status'])
+        image = worst(durability['image/restart'], durability['image-fork/restart'])
+        production = 'rejected' if qualification == 'fail' else 'pending_manual_review'
         notes = []
         if image == 'fail':
             notes.append('Images were not reused from disk after a restart: the release stays production-rejected.')
@@ -226,7 +234,12 @@ class Verdict:
                                          'steps': [turns[k] for k in sorted(turns, key=lambda k: turns[k]['seq'])]},
                             'durability': {'status': worst(*durability.values()), 'required': durability,
                                            'probes': probes},
-                            'identity': identity, 'qualification': qualification, 'production': production,
+                            'identity': identity, 'large_first_save': first_save,
+                            'qualification': qualification, 'production': production,
+                            'manual_gates': ['actual four-stream capacity and funded cache',
+                                             'verified mid-write crash and older-point recovery',
+                                             'quota pressure and healthy subsequent requests',
+                                             'real Pi cache/tool loop', 'successful Python rollback'],
                             'notes': notes})
 
     def report(self, body):
@@ -236,9 +249,9 @@ class Verdict:
                'problems': self.problems, **body}
         if self.problems or body.get('problems'):
             out.update(qualification='invalid', production='unknown')
-        out['meaning'] = ('qualification pass means these receipts support recording the release as qualified; it is '
-                          'recorded separately, by the release file procedure in AGENTS.md. Workload pass alone is not '
-                          'qualification.')
+        out['meaning'] = ('qualification describes only the automated workload and disk probes. Even a pass requires '
+                          'review of the separate manual gates before the release may be qualified in AGENTS.md; '
+                          'a lifecycle note alone does not prove a mid-write crash, quota pressure or rollback.')
         return out
 
     # Workload: every chat attempt, re-derived from its wire bytes and the plan.
@@ -281,14 +294,14 @@ class Verdict:
         except (ValueError, KeyError, IndexError) as error:
             expected = None
             reasons.append(f'request cannot be regenerated: {error}')
-        if session == 'image' and step == 'first':
+        if session in ('image', 'image-fork') and step == 'first':
             try:
                 urls = [x['image_url']['url'] for x in body['messages'][-1]['content'] if x['type'] == 'image_url']
                 seen = [workload.quadrant_colors(base64.b64decode(u.split(',', 1)[1])) for u in urls]
             except (ValueError, KeyError, TypeError, IndexError) as error:
                 seen = f'unreadable: {error}'
             out['image_colors'] = seen
-            if seen != p['images']:
+            if seen != workload.image_plan(p, session)['images']:
                 reasons.append('images do not carry the planned quadrant colors')
         if reply and expected is not None:
             if session == 'pi' and step == 'call':
@@ -322,6 +335,26 @@ class Verdict:
 
     # Durability: a continuation after a recorded lifecycle event, judged from the native log lines.
 
+    def first_save(self):
+        first = next((r for r in self.receipts if r['kind'] == 'chat' and r['session'] == 'ledger'
+                      and r['step'] == 'first'), None)
+        if first is None or not self.complete(first):
+            return {'status': 'unknown', 'reason': 'no completed first ledger request'}
+        body = self.c.parsed(first, 'request', strict_json)
+        measured = self.measures.get(('measure', sha256(canonical(workload.tokenize_body(body)))))
+        if measured is None or measured['count'] < 300000:
+            return {'status': 'fail', 'reason': 'first ledger prompt was not measured at >=300000 tokens'}
+        start = when(first['started_at'])
+        next_chat = next((r for r in self.receipts if r['kind'] == 'chat' and r['seq'] > first['seq']), None)
+        # A later large save must never stand in for the first save. Wait for its receipt before the next turn.
+        end = when(next_chat['started_at']) if next_chat else when(first['ended_at'])
+        floor, ceiling = measured['count'] - self.tolerance, measured['count'] + self.completion(first)
+        saves = self.found('save', start, end, floor, ceiling)
+        skips = self.found('skip', start, end, floor, ceiling)
+        return {'status': 'pass' if saves else 'fail' if skips else 'unknown',
+                'measured_prompt_tokens': measured['count'], 'saves': [x['line'] for x in saves],
+                'skipped': [x['line'] for x in skips]}
+
     def probes(self):
         out = []
         chats = [r for r in self.receipts if r['kind'] == 'chat']
@@ -350,8 +383,29 @@ class Verdict:
     def found(self, kind, start, end, floor, ceiling):
         """Lines in a request's time window whose token count fits it: a read longer than the request's own prompt
         belongs to another conversation, however close in time."""
-        return [x for x in self.lines if x['kind'] == kind and start - self.skew <= x['ts'] <= end + self.skew and
-                floor <= int(next(g for g in x['groups'] if g is not None)) <= ceiling]
+        lines = [x for x in self.lines if x['kind'] == kind and start - self.skew <= x['ts'] <= end + self.skew and
+                 floor <= int(next(g for g in x['groups'] if g is not None)) <= ceiling]
+        if kind != 'read':
+            return lines
+        # Adjacent image histories can have exactly the same length. With clock skew, a read might fit both.
+        # Never credit one request's read to another: ambiguous lines cannot establish either probe.
+        unique = []
+        for line in lines:
+            candidates = 0
+            for r in self.receipts:
+                if r['kind'] != 'chat':
+                    continue
+                if not when(r['started_at']) - self.skew <= line['ts'] <= when(r['ended_at']) + self.skew:
+                    continue
+                body = self.c.parsed(r, 'request', strict_json)
+                measured = self.measures.get(('measure', sha256(canonical(workload.tokenize_body(body)))))
+                if measured and floor <= int(line['groups'][0]) <= measured['count']:
+                    candidates += 1
+            if candidates == 1:
+                unique.append(line)
+            elif candidates > 1:
+                self.ambiguous_reads.add((start, end))
+        return unique
 
     def covered(self, start, end):
         return any(first <= start - self.skew and captured >= end + self.skew for first, captured in self.coverage)
@@ -368,10 +422,11 @@ class Verdict:
             out['reasons'].append('the prior request has no measured token count')
             return dict(out, status='unknown')
         floor = measured['count'] - self.tolerance
-        if session == 'image':
-            image_body = workload.tokenize_body(workload.chat_body(self.p, 'image', [
-                {'role': 'system', 'content': workload.SYSTEM['image']},
-                {'role': 'user', 'content': workload.image_parts(self.p)}]), add_generation_prompt=False)
+        if session in ('image', 'image-fork'):
+            image_body = workload.tokenize_body(workload.chat_body(self.p, session, [
+                {'role': 'system', 'content': workload.SYSTEM[session]},
+                {'role': 'user', 'content': workload.image_parts(workload.image_plan(self.p, session))}]),
+                add_generation_prompt=False)
             prefix = self.measures.get(('image-prefix', sha256(canonical(image_body))))
             if prefix is None:
                 out['reasons'].append('no measured image prefix: cannot tell whether a read covered the images')
@@ -420,7 +475,10 @@ class Verdict:
                                       'at least one state')
                 status = worst(status, 'fail' if stores or self.covered(c_start, c_end) else 'unknown')
         if not reads:
-            if kind == 'eviction':
+            if (c_start, c_end) in self.ambiguous_reads:
+                out['reasons'].append('a disk read could belong to another request within the clock-skew window')
+                status = worst(status, 'unknown')
+            elif kind == 'eviction':
                 resumes = self.resumes(session, event['seq'], cont['seq'])
                 out['resume_from'] = resumes
                 if 'disk' in resumes:

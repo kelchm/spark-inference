@@ -63,6 +63,7 @@ def key(args):
 
 def server(args):
     c = Campaign(args.campaign)
+    c.require_current_harness()
     for path in ('/health', '/v1/models'):
         result = exchange(args.endpoint, 'GET', path, None, args.deadline, max_bytes=LIMITS['small'], api_key=key(args))
         raw = result.pop('raw')
@@ -113,6 +114,7 @@ def next_step(c, session, receipts, retry, continuation):
 
 def turn(args):
     c = Campaign(args.campaign)
+    c.require_current_harness()
     p = c.plan
     session = args.session
     step, done = next_step(c, session, c.receipts(), args.retry, args.continuation)
@@ -138,9 +140,9 @@ def turn(args):
     measured = tokenize(c, args, body, 'measure', session, step)
     if measured > (p['ceiling'] if step.startswith('continue-') else limit):
         raise SystemExit(f'{measured} prompt tokens exceed the limit; nothing was sent')
-    if session == 'image' and step == 'first':
-        prefix = workload.chat_body(p, 'image', [{'role': 'system', 'content': workload.SYSTEM['image']},
-                                                 {'role': 'user', 'content': workload.image_parts(p)}])
+    if session in ('image', 'image-fork') and step == 'first':
+        prefix = workload.chat_body(p, session, [{'role': 'system', 'content': workload.SYSTEM[session]},
+                 {'role': 'user', 'content': workload.image_parts(workload.image_plan(p, session))}])
         tokenize(c, args, prefix, 'image-prefix', session, step, add_generation_prompt=False)
     request = canonical(body)
     result = exchange(args.endpoint, 'POST', '/v1/chat/completions', request, args.deadline, stream=True,
@@ -149,8 +151,14 @@ def turn(args):
     observed = {'correct': None}
     try:
         reply = parse_sse(raw)
+        if session == 'pi' and step == 'call':
+            results = workload.tool_results(p, reply['message'])
+            correct = reply['finish_reason'] == 'tool_calls' and bool(results) and all(
+                x['content'] == p['pi']['value'] for x in results)
+        else:
+            correct = workload.correct(expected, reply['message']['content'])
         observed = {'finish_reason': reply['finish_reason'], 'usage': reply['usage'],
-                    'correct': workload.correct(expected, reply['message']['content'])}
+                    'correct': correct}
     except ValueError as error:
         observed['parse_error'] = str(error)
     record = c.write('chat', f'{session}-{step}',
@@ -160,12 +168,13 @@ def turn(args):
     state = 'complete' if result['complete'] else f'FAILED: {result["error"]}'
     print(f'{session}/{step}: receipt {record["seq"]}, {measured} prompt tokens, {state}, '
           f'answer {"correct" if observed["correct"] else "NOT correct"} ({result["elapsed_s"]:.1f}s)')
-    if not result['complete']:
+    if not result['complete'] or observed['correct'] is not True:
         sys.exit(1)
 
 
 def imprint(args):
     c = Campaign(args.campaign)
+    c.require_current_harness()
     receipts = c.receipts()
     step, done = next_step(c, args.session, receipts, False, True)
     body = workload.next_turn(c.plan, args.session, step, [h[:2] for h in done])[0]

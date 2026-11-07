@@ -14,10 +14,10 @@ import zlib
 CONTEXT = 1_048_576
 REPLY_RESERVATION = 32_768
 CEILING = CONTEXT - REPLY_RESERVATION  # the longest prompt the 1M profile admits
-SESSIONS = ('ledger', 'evictor', 'image', 'pi')
+SESSIONS = ('ledger', 'evictor', 'image', 'image-fork', 'pi')
 BASE_STEPS = {'ledger': ('first', 'grow-1', 'grow-2', 'grow-3', 'grow-4'), 'evictor': ('first',),
-              'image': ('first',), 'pi': ('call', 'result')}
-CONTINUABLE = ('ledger', 'image', 'pi')
+              'image': ('first',), 'image-fork': ('first',), 'pi': ('call', 'result')}
+CONTINUABLE = ('ledger', 'image', 'image-fork', 'pi')
 
 WORDS = ('amber', 'basin', 'cedar', 'delta', 'ember', 'fjord', 'grove', 'harbor', 'inlet', 'juniper', 'kettle',
          'lantern', 'meadow', 'nectar', 'orchard', 'pebble', 'quarry', 'ridge', 'saddle', 'thicket', 'upland',
@@ -39,6 +39,7 @@ SYSTEM = {
     'image': 'You describe images precisely. Name colors using only these words: ' + ', '.join(PALETTE) + '.',
     'pi': 'You are a coding agent working in a terminal. Use the provided tools when a task needs them.',
 }
+SYSTEM['image-fork'] = SYSTEM['image']
 PI_TOOLS = [{'type': 'function', 'function': {
     'name': 'read_ledger', 'description': 'Read one ledger record by its key and return the stored value.',
     'parameters': {'type': 'object', 'properties': {'key': {'type': 'string', 'description': 'The record key.'}},
@@ -182,6 +183,11 @@ def image_parts(p):
     return parts
 
 
+def image_plan(p, session):
+    # Identical text, dimensions and positions, different pixels: expose image-identity aliasing.
+    return dict(p, images=[colors[1:] + colors[:1] for colors in p['images']]) if session == 'image-fork' else p
+
+
 def image_user(p, step):
     k = 0 if step == 'first' else int(step.split('-', 1)[1])
     questions, expected = [], {}
@@ -273,8 +279,8 @@ def next_turn(p, session, step, history, chunks=None):
         user, expected = ledger_user(p, session, step, start, count)
         meta.update(chunk_start=start, chunks=count)
         messages.append(user)
-    elif session == 'image':
-        user, expected = image_user(p, step)
+    elif session in ('image', 'image-fork'):
+        user, expected = image_user(image_plan(p, session), step)
         messages.append(user)
     elif step == 'result':
         expected = {'1': p['pi']['value']}
