@@ -75,8 +75,11 @@ jobs:
             ZIG_SHA256=${{ steps.recipe.outputs.zig_sha256 }}
             ZIG_CPU=${{ steps.recipe.outputs.zig_cpu }}
             SM=${{ steps.recipe.outputs.sm }}
+          # Every run saves its layers: the engine compile (~20 min) depends only on the engine commit, toolchain and
+          # build arguments, so later runs that change labels or the runtime stage reuse it. A pull request's cache is
+          # scoped to that pull request and cannot change what main builds.
           cache-from: type=gha,scope=${{ inputs.model }}
-          cache-to: ${{ inputs.publish && format('type=gha,scope={0},mode=max', inputs.model) || '' }}
+          cache-to: type=gha,scope=${{ inputs.model }},mode=max
       - if: inputs.publish
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
