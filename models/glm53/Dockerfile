@@ -161,7 +161,10 @@ ARG KIT_SERIES_SHA256
 ARG SM=121
 ARG ZIG_VERSION=0.17.0
 ARG NCCL_MIN=2.30.0
-RUN apt-get update \
+# The kit identity becomes labels below; an image without it would not say what it was built from.
+RUN [[ -n "${KIT_REPO}" && -n "${KIT_REV}" && -n "${KIT_SERIES_SHA256}" ]] \
+      || { echo "KIT_REPO, KIT_REV and KIT_SERIES_SHA256 are required (recipe.json kit.*)" >&2; exit 1; } \
+ && apt-get update \
  && apt-get install -y --no-install-recommends libibverbs1 ibverbs-providers rdma-core python3 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=nccl /opt/nccl/ /opt/nccl/
