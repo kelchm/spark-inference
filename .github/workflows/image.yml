@@ -1,0 +1,91 @@
+name: Image
+
+# One model line's image, built from models/<model>/recipe.json on an ARM64 runner. The caller grants permissions:
+# pull requests get read-only contents and never publish; publishing callers add packages, id-token and attestations.
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: false
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 300
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}/${{ inputs.model }}
+      RECIPE: models/${{ inputs.model }}/recipe.json
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Read the recipe
+        id: recipe
+        run: |
+          {
+            echo "engine_repo=$(jq -r .engine.repository "$RECIPE")"
+            echo "engine_commit=$(jq -r .engine.commit "$RECIPE")"
+            echo "base_image=$(jq -r .build.base_image "$RECIPE")"
+            echo "runtime_image=$(jq -r .build.runtime_image "$RECIPE")"
+            echo "zig_version=$(jq -r .build.zig_version "$RECIPE")"
+            echo "zig_sha256=$(jq -r .build.zig_sha256 "$RECIPE")"
+            echo "zig_cpu=$(jq -r .build.zig_cpu "$RECIPE")"
+            echo "sm=$(jq -r .build.sm "$RECIPE")"
+          } >> "$GITHUB_OUTPUT"
+      # The CUDA devel base and the engine's build need more room than the runner leaves free by default.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - if: inputs.publish
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build${{ inputs.publish && ' and publish' || '' }}
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: models/${{ inputs.model }}
+          file: models/${{ inputs.model }}/Dockerfile
+          platforms: linux/arm64
+          push: ${{ inputs.publish }}
+          tags: |
+            ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ env.IMAGE }}:main
+          build-args: |
+            BASE_IMAGE=${{ steps.recipe.outputs.base_image }}
+            RUNTIME_IMAGE=${{ steps.recipe.outputs.runtime_image }}
+            TF_REPO=https://github.com/${{ steps.recipe.outputs.engine_repo }}.git
+            TF_REF=${{ steps.recipe.outputs.engine_commit }}
+            RECIPE_COMMIT=${{ github.sha }}
+            ZIG_VERSION=${{ steps.recipe.outputs.zig_version }}
+            ZIG_SHA256=${{ steps.recipe.outputs.zig_sha256 }}
+            ZIG_CPU=${{ steps.recipe.outputs.zig_cpu }}
+            SM=${{ steps.recipe.outputs.sm }}
+          cache-from: type=gha,scope=${{ inputs.model }}
+          cache-to: ${{ inputs.publish && format('type=gha,scope={0},mode=max', inputs.model) || '' }}
+      - if: inputs.publish
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ENGINE: ${{ steps.recipe.outputs.engine_repo }}@${{ steps.recipe.outputs.engine_commit }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          {
+            echo "### ${{ inputs.model }}"
+            echo "- Engine: \`$ENGINE\`"
+            echo "- Image: \`$IMAGE@$DIGEST\` (published: $PUBLISH)"
+            echo "- Built, not qualified: qualification on the Sparks is a separate step."
+          } >> "$GITHUB_STEP_SUMMARY"

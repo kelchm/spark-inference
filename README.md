@@ -17,7 +17,7 @@ Engine behaviour and its tests belong in the engine fork. Model and hardware qua
 - `models/<model>/recipe.json`: the pins for one model line (engine repository and commit, kit, base images, toolchain, weights).
 - `models/<model>/Dockerfile`: builds that line's image from its pinned engine commit.
 - `tools/`: maintenance tools, such as importing a kit's patch series into the engine fork.
-- `.github/workflows/`: one reusable image build, called for each model line.
+- `.github/workflows/`: one reusable image build, called for each model line. Lint with `mise exec -- actionlint`; `mise.toml` pins the tools.
 
 ## Images
 

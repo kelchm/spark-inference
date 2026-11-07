@@ -1,0 +1,46 @@
+name: Build images
+
+# Pull requests build every model line without publishing or credentials. Pushes to main publish by digest.
+on:
+  pull_request:
+    paths: ["models/**", ".github/workflows/**"]
+  push:
+    branches: [main]
+    paths: ["models/**", ".github/workflows/**"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [glm53]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/image.yml
+    with:
+      model: ${{ matrix.model }}
+      publish: false
+
+  publish:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        model: [glm53]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/image.yml
+    with:
+      model: ${{ matrix.model }}
+      publish: true
