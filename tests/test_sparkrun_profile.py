@@ -51,6 +51,7 @@ class NativeProfileTests(unittest.TestCase):
             self.assertEqual(first[first.index(flag) + 1], value)
         self.assertIn('--thinking', first)
         self.assertIn('--learn-conversations', first)
+        self.assertIn('--dashboard', first)
         self.assertNotIn('--spill-gib', first)
 
     def test_unsafe_placement_and_store_overrides_refuse_before_spawn(self):
