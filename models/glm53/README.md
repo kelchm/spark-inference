@@ -15,14 +15,15 @@ A built image proves only that it builds. Before this line serves production:
 
 ## Updating the kit
 
-Import a new kit revision into a new branch with [tools/kit_import.py](../../tools/kit_import.py), passing `--series-sha256` with the digest you expect, compare it with the current branch using `git range-diff`, then point `recipe.json` at the result. The import is reproducible: the same kit, base and committer give the same commit SHAs, so anyone can re-run it and check `engine.commit`. For this branch:
+Import a new kit revision into a new branch with [tools/kit_import.py](../../tools/kit_import.py), passing `--series-sha256` with the digest you expect, compare it with the current branch using `git range-diff`, then point `recipe.json` at the result. The import is reproducible: the same kit, base and committer give the same commit SHAs, so anyone can re-run it into a scratch branch and check it against `engine.commit`. For this branch:
 
 ```sh
 tools/kit_import.py --repo ../TensorFold --kit ../GLM-5.3-Flash-DGX-Sparks-1104 \
   --kit-repo MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 --base f350cd3ea253a042e205746928271f9d8f71a82d \
-  --branch deploy/glm53 --notices packaging/kits/glm-5.3-flash-dgx-sparks-1104 \
+  --branch check/glm53 --notices packaging/kits/glm-5.3-flash-dgx-sparks-1104 \
   --default-author 'MiaAI Lab <83042094+MiaAI-Lab@users.noreply.github.com>' \
   --series-sha256 287db8619735278d26139df314ddc01e938f70a09286224e528739772b2829fb
+git -C ../TensorFold rev-parse check/glm53   # e52eb42b52b1e50f3f23a5eae8115bbe80c5e7d9
 ```
 
 The committer is whoever runs it; `deploy/glm53` was imported as Matthew Kelch <172301+kelchm@users.noreply.github.com>.

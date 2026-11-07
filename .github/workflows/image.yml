@@ -56,7 +56,7 @@ jobs:
           file: models/${{ inputs.model }}/Dockerfile
           platforms: linux/arm64
           push: ${{ inputs.publish }}
-          # Only an immutable commit tag: deployments pin the digest, so no moving tag can be promoted out of order.
+          # One tag per recipe commit, for finding a build; a rerun can repoint it. Deployments pin the digest.
           tags: ${{ env.IMAGE }}:sha-${{ github.sha }}
           build-args: |
             BASE_IMAGE=${{ steps.recipe.outputs.base_image }}

@@ -157,8 +157,9 @@ def main():
     if subprocess.run(['git', 'rev-parse', '-q', '--verify', f'refs/heads/{args.branch}'], cwd=repo,
                       stdout=subprocess.DEVNULL).returncode == 0:
         raise SystemExit(f'branch {args.branch} already exists')
-    start = subprocess.run(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, capture_output=True,
-                           text=True).stdout.strip() or run('git', 'rev-parse', 'HEAD', cwd=repo, capture=True).strip()
+    branch = subprocess.run(['git', 'symbolic-ref', '-q', '--short', 'HEAD'], cwd=repo, capture_output=True,
+                            text=True).stdout.strip()
+    start = ['--detach', run('git', 'rev-parse', 'HEAD', cwd=repo, capture=True).strip()] if not branch else [branch]
     try:
         series_head = import_series(repo, args, kit, rev, patches, (name, email_))
         expected = reference_tree(repo, args.base, patches)
@@ -167,7 +168,7 @@ def main():
     except BaseException:
         # The checkout was clean at the start, so everything here is ours to discard.
         run('git', 'reset', '-q', '--hard', cwd=repo)
-        run('git', 'switch', '-q', *(['--detach'] if len(start) == 40 else []), start, cwd=repo)
+        run('git', 'switch', '-q', *start, cwd=repo)
         subprocess.run(['git', 'branch', '-D', '-q', args.branch], cwd=repo, stderr=subprocess.DEVNULL)
         raise
     count = int(run('git', 'rev-list', '--count', f'{args.base}..HEAD', cwd=repo, capture=True))
