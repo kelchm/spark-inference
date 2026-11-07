@@ -34,6 +34,8 @@
   },
   "changes": "First release of this lane: Mia's kit at 13f2464 on TensorFold f350cd3e with no engine changes of ours, built by this repository's Dockerfile (explicit Spark CPU target, no video).",
   "qualification": {
-    "status": "pending"
+    "status": "rejected",
+    "receipt": "https://github.com/kelchm/home-lab/blob/95649e8370beb560c020cd828b6bc9f2fb5ab244/sparks/inference/deployments/glm53-mia-2026.11.07-agent-1m/rerun.json",
+    "date": "2026-11-07"
   }
 }
