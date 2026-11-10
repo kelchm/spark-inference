@@ -173,6 +173,9 @@
       ]
     }
   ],
+  "notices_pending": [
+    "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104"
+  ],
   "build": {
     "base_image": "nvidia/cuda@sha256:afc92f9727f96346f2912934f11e5a43aa0581aca4a826bd5c8fd4ab6b152bcc",
     "runtime_image": "nvidia/cuda@sha256:585155539dd4ff2ab653ee59d812aae81a9406a5804596d516c06e3a5719eb26",

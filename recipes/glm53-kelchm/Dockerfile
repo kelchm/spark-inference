@@ -5,8 +5,9 @@
 # with no kit), so nothing is patched here; immutable base arguments; Python for SparkRun mods; no video stage
 # (WITH_VIDEO is off in the kit too); no execution of Spark CPU binaries during the build; OCI labels naming the
 # engine and recipe commits.
-# Changes from glm53-mia's: the kit arguments are optional. Without a kit they are all empty, the tf.kit.* labels are
-# empty, and there are no kit notices to copy.
+# Changes from glm53-mia's: the kit arguments are optional. Without a kit they are all empty and the tf.kit.* labels
+# are empty. Kit notices under packaging/kits are copied whenever the engine has them, and required only with a kit;
+# tools/check_recipe.py requires them of an engine whose carries adapt a kit's patches.
 ARG BASE_IMAGE
 ARG RUNTIME_IMAGE
 
@@ -114,7 +115,8 @@ RUN --mount=type=cache,id=tensorfold-zig-global,target=/root/.cache/zig \
 
 COPY --from=codecs /codecs/lib/ ${PREFIX}/native/lib/
 COPY --from=codecs /codecs/LICENSES/ ${PREFIX}/LICENSES/
-# A kit's engine branch carries its notices under packaging/kits; a lane with a kit must have them.
+# A kit's engine branch carries its notices under packaging/kits, as does an engine whose commits adapt a kit's patches
+# without importing it. A lane with a kit must have them; any lane's are copied when the engine has them.
 ARG KIT_REPO
 RUN shopt -s nullglob \
  && mkdir -p "${PREFIX}/LICENSES/tensorfold" \
@@ -122,7 +124,7 @@ RUN shopt -s nullglob \
  && cp /src/xgrammar/LICENSE "${PREFIX}/LICENSES/xgrammar-Apache-2.0.txt" \
  && cp /src/xgrammar/NOTICE "${PREFIX}/LICENSES/xgrammar-NOTICE.txt" \
  && cp /src/xgrammar/3rdparty/dlpack/LICENSE "${PREFIX}/LICENSES/dlpack-Apache-2.0.txt" \
- && if [[ -n "${KIT_REPO}" ]]; then cp -r packaging/kits "${PREFIX}/LICENSES/kits"; fi \
+ && if [[ -n "${KIT_REPO}" || -d packaging/kits ]]; then cp -r packaging/kits "${PREFIX}/LICENSES/kits"; fi \
  && { echo "tf_repo=${TF_REPO}"; echo "tf_commit=$(git rev-parse HEAD)"; \
       echo "tf_version=$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"; \
       echo "zig=${ZIG_VERSION} cpu=${ZIG_CPU} sm=${SM} optimize=fast strip=${STRIP}"; \

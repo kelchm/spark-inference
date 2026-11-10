@@ -6,8 +6,12 @@ kit-notices commit below it must name the recipe's kit revision, patch count and
 patch it names must appear as imported commits carrying that kit's Origin trailer; our own changes are the commits
 above the notices commit. A lane without a kit builds on upstream TensorFold itself: the upstream commit must be an
 ancestor of the engine commit, and our own changes are the commits above it. Either way they must be exactly the
-recipe's "carries" list, oldest first, each listing its commit's Adapted-from trailers as "adapted_from". Only commit
-metadata is fetched.
+recipe's "carries" list, oldest first, each listing its commit's Adapted-from trailers as "adapted_from".
+
+Every project whose patches a lane takes, its kit's or a source a carry adapts, must have its LICENSE, NOTICE.md and
+CREDITS.md under packaging/kits/<repository name, lowercased>/ at the engine commit, as kit imports leave them; the
+lane's image copies that folder. A recipe whose engine commit predates them lists those projects in "notices_pending",
+exactly, and cannot be released. Only commit metadata and the trees of those folders are fetched.
 """
 import json
 from pathlib import Path
@@ -18,6 +22,7 @@ import tempfile
 
 DEPTH = 600  # comfortably more than a kit's patch count plus what a lane carries
 ADAPTED = re.compile(r'^Adapted-from: (.+)$', re.M)
+NOTICES = ('LICENSE', 'NOTICE.md', 'CREDITS.md')
 
 
 def git(*args, cwd):
@@ -42,6 +47,25 @@ def compare_carries(recipe, ours, above):
             if (sources := ADAPTED.findall(body)) != entry.get('adapted_from', [])]
 
 
+def check_notices(recipe, repo):
+    """Problems where the engine commit's kit notices differ from what the recipe takes and lists as pending."""
+    kit = recipe.get('kit')
+    sources = {kit['repository']} if kit else set()
+    sources |= {source.partition('@')[0] for entry in recipe.get('carries', [])
+                for source in entry.get('adapted_from', [])}
+    missing = {}
+    for source in sources:
+        folder = f"packaging/kits/{source.rpartition('/')[2].lower()}"
+        found = git('ls-tree', '--name-only', recipe['engine']['commit'], f'{folder}/', cwd=repo).split()
+        if not {f'{folder}/{name}' for name in NOTICES} <= set(found):
+            missing[source] = folder
+    pending = set(recipe.get('notices_pending', []))
+    return ([f"engine.commit lacks {missing[source]}/{{{','.join(NOTICES)}}}, the notices of {source}, whose patches "
+             'this lane takes' for source in sorted(missing.keys() - pending)]
+            + [f'notices_pending names {source}, but engine.commit carries its notices or the lane takes none of its '
+               'patches: remove it' for source in sorted(pending - missing.keys())])
+
+
 def check(path):
     recipe = json.loads(path.read_text())
     lane, engine, kit = path.parent.name, recipe['engine'], recipe.get('kit')
@@ -58,6 +82,7 @@ def check(path):
         on_branch = subprocess.run(['git', 'merge-base', '--is-ancestor', engine['commit'], 'refs/lane'], cwd=repo)
         if on_branch.returncode:
             return problems + [f"engine.commit {engine['commit'][:12]} is not on {engine['branch']}"]
+        problems += check_notices(recipe, repo)
         if kit is None:
             on_base = subprocess.run(['git', 'merge-base', '--is-ancestor', base, engine['commit']], cwd=repo,
                                      capture_output=True)

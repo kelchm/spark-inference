@@ -9,7 +9,11 @@ The engine is [`deploy/glm53-kelchm`](https://github.com/kelchm/TensorFold/tree/
 
 ## How it differs from glm53-mia
 
-[`glm53-mia`](../glm53-mia/) follows Mia's kit: 110 imported patches on TensorFold `f350cd3e`, taken as a whole. This lane starts from newer upstream TensorFold and takes only the changes we choose, each a reviewed commit we can send upstream or drop. Weights, drafter and build pins are the same. The [Dockerfile](Dockerfile) follows glm53-mia's step for step; without a kit its kit arguments are empty, the image's `tf.kit.*` labels are empty, and there are no kit notices to copy.
+[`glm53-mia`](../glm53-mia/) follows Mia's kit: 110 imported patches on TensorFold `f350cd3e`, taken as a whole. This lane starts from newer upstream TensorFold and takes only the changes we choose, each a reviewed commit we can send upstream or drop. Weights, drafter and build pins are the same. The [Dockerfile](Dockerfile) follows glm53-mia's step for step; without a kit its kit arguments are empty and the image's `tf.kit.*` labels are empty.
+
+## Kit notices
+
+Mia's kit is Apache-2.0 and asks that its notice and credits accompany modified versions. This lane imports no kit, but its adapted commits take patches from it, so its engine must carry the kit's `LICENSE`, `NOTICE.md` and `CREDITS.md` under `packaging/kits/glm-5.3-flash-dgx-sparks-1104/`, as glm53-mia's does, and the Dockerfile copies `packaging/kits` into the image's `/opt/tensorfold/LICENSES/kits/` whenever the engine has it. `tools/check_recipe.py` requires those files at `engine.commit` for every project a carry's `adapted_from` names. While the pinned engine commit predates them, the recipe lists the kit in `notices_pending`: the check accepts that list only while it is exactly what is missing, and `tools/new_release.py` and `tools/check_release.py` refuse to release such a recipe. Moving `engine.commit` to one that carries the files therefore also means deleting `notices_pending`, which the check then demands.
 
 ## Recommended serving profile
 

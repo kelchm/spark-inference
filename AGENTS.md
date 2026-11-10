@@ -24,7 +24,7 @@ This repository is the front door for models served on the DGX Spark pair. Engin
 
 1. **Upstream first:** branch `contrib/<topic>` from upstream `main`, with a failing test before the fix, following TensorFold's AGENTS.md and pull request pre-flight.
 2. **Backport:** branch `work/<lane>/<topic>` from `deploy/<lane>`, apply the change adapted to the lane's base with a `Backport-of: ashhart/TensorFold#<n>` trailer (or the contrib branch until the pull request exists), and open a pull request into `deploy/<lane>` in the fork.
-3. After it merges, add it to the recipe's `carries` (`subject`; `upstream` once known; `adapted_from` repeating the commit's `Adapted-from:` trailers, which `tools/check_recipe.py` compares), bump `engine.commit`, and open a pull request here.
+3. After it merges, add it to the recipe's `carries` (`subject`; `upstream` once known; `adapted_from` repeating the commit's `Adapted-from:` trailers, which `tools/check_recipe.py` compares), bump `engine.commit`, and open a pull request here. A commit that adapts another project's Apache-2.0 patch needs that project's `LICENSE`, `NOTICE.md` and `CREDITS.md` under `packaging/kits/<repository name, lowercased>/` on the deploy branch, verbatim; the check requires them, and a recipe may list the project in `notices_pending` only until they land.
 4. When upstream or the lane's kit includes the change, drop it at the next kit update (or, for a lane without a kit, the next rebase onto upstream) and remove it from `carries`.
 
 ## Cut a release

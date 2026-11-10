@@ -68,6 +68,8 @@ def check(path):
         recipe = json.loads(shown.stdout)
         problems += [f'{key} differs from recipe.json at {commit[:12]}' for key in PINNED
                      if release.get(key) != recipe.get(key)]
+        if recipe.get('notices_pending'):
+            problems.append(f'recipe.json at {commit[:12]} has notices_pending: its image lacks those notices')
     image = IMAGE.fullmatch(release.get('image', ''))
     if not image or image['repo'] != f'kelchm/spark-inference/{lane}':
         problems.append(f'image must be ghcr.io/kelchm/spark-inference/{lane}@sha256:<digest>')
