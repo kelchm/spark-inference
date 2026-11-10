@@ -1,0 +1,192 @@
+{
+  "lane": "glm53-kelchm",
+  "model": "GLM-5.3-Flash",
+  "engine": {
+    "repository": "kelchm/TensorFold",
+    "branch": "deploy/glm53-kelchm",
+    "commit": "bb70f0a269f4e5b7f18b1f7b1b73eea439225b83",
+    "upstream": "ashhart/TensorFold@fcf85f7a56cce1956dd131b9973e675b5703c8ba"
+  },
+  "carries": [
+    {
+      "subject": "GLM on CUDA: a kept state's disk image on one rank, its parts and where each byte sits in its lease",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "GLM on CUDA: --learn-conversations keeps every rank's part of a kept state on disk",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "rows: a pool that reuses spare storage without trimming it reads a disk state into that storage",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "rows: a pool that also trims reads a disk state only within its budget, as before",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "GLM on CUDA: a disk read's seal refuses ring bases that do not hold the state's rows",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "rows: the grid test runs on both writers, the test's thread and the I/O worker GLM's store uses",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "GLM on CUDA: --spill-gib and --checkpoint-slots are refused, as --learn-conversations alone keeps its states",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "GLM on CUDA: the disk image downloads through cuda.memory.download, the shared-store refusal names TF_KV_SHARE",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "GLM on CUDA: a disk image's words record the world, the layout and the owner, and a read refuses another by name",
+      "upstream": "ashhart/TensorFold#1411"
+    },
+    {
+      "subject": "glm cuda: opt-in message-start prompt cuts, so a chat's next turn resumes at its history (part of #2396)",
+      "upstream": "ashhart/TensorFold#2404"
+    },
+    {
+      "subject": "glm cuda: request starts keep GLM's measured 256-token minimum (request_min_chunk), Qwen keeps every start",
+      "upstream": "ashhart/TensorFold#2404"
+    },
+    {
+      "subject": "glm cuda: EXL3 prompt experts take a whole prompt pass in one call (experiment)"
+    },
+    {
+      "subject": "glm cuda: packed prompt projections in two stages",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0009-glm-cuda-packed-prompt-matmuls-in-two-stages-two-blo.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: precompute packed prompt loads and decode eight-bit pairs",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0080-exl3p-0069-r6-glm-mm-prompt-loads-and-pairs.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: write prompt EXL3 experts directly into routed slots",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0007-glm-cuda-a-prompt-pass-s-EXL3-experts-in-one-call-wr.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: stage prompt expert tiles ahead in GLM-only kernels",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0078-exl3p-0067-exl3p-prompt-experts-main-loop-and-epilogues.patch"
+      ]
+    },
+    {
+      "subject": "contract: retain EXL3 prompt source resources as pending port evidence",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0079-exl3p-0068-exl3p-contract-records.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: prefetch FP8 latent key tiles in eight-byte units",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0005-glm-cuda-latent-attention-reads-FP8-key-tiles-in-8-b.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: name the latent chunk kernels' 256-thread contract",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0011-glm-cuda-the-latent-attention-chunks-256-thread-laun.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: opt into prompt absorb and expand tensor-core GEMMs",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0041-glm-cuda-TF_GLM_ABSORB_MMA-1-a-prompt-s-absorb_q-and.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: opt into 8,192-row solo prompt passes"
+    },
+    {
+      "subject": "glm cuda: pair prompt steps beside DFlash2, each chunk tapped as it would be alone",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0057-glm-cuda-paired-prompt-steps-beside-DFlash2-each-chu.patch, patches/engine/0061-glm-cuda-a-paired-step-s-twin-holds-no-tap-rows-and-.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: TF_GLM_SHARED_BUDGETS=0 sizes shared drafts from each stream's last grant plus slack",
+      "issue": "ashhart/TensorFold#2720"
+    },
+    {
+      "subject": "glm cuda: merge a prompt's sparse attention chunks in the kernel",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0068-attn5-0068-glm-sparse-attention-in-kernel-merge.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: TF_GLM_PROMPT_PAIR=solo pairs two 4,096-row solo chunks in one pass"
+    },
+    {
+      "subject": "glm cuda: the zero-grant tests set Lanes.budgets"
+    },
+    {
+      "subject": "glm cuda: TF_GLM_EXL3_BF16_SLOTS=1 writes an EXL3 prompt chunk's MoE slot rows as bf16"
+    },
+    {
+      "subject": "glm cuda: the GLM prompt contract's cases keep their hooks in a container constant"
+    },
+    {
+      "subject": "cuda: measure hardware ceilings in the test runner"
+    },
+    {
+      "subject": "cuda: benchmark GLM packed prompt projections"
+    },
+    {
+      "subject": "glm cuda: packed prompt matmuls visit blocks in groups of 8 row blocks"
+    },
+    {
+      "subject": "glm cuda: group packed prompt blocks only when the weights outgrow L2"
+    },
+    {
+      "subject": "glm cuda: TF_GLM_HC_FUSE=1 has a prompt call's hc_post write the next site's hc_pre partials"
+    },
+    {
+      "subject": "glm cuda: decode glue and K-slice reduces as dependent launches (TF_GLM_PDL_CHAIN)",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0069-pdl5-0067-glm-pdl-reduce.patch",
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0070-pdl5-0068-glm-pdl-hc-chain.patch",
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0083-pdl5-0070-glm-pdl-moe-router-glue.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: KDA decode steps with 4 or 2 warps a block for small windows (TF_GLM_KDA_STEP_WARPS)",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0084-pdl5-0071-glm-kda-step-warps.patch",
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0085-integ5-tests-kda-step-warps-no-logged-error.patch"
+      ]
+    },
+    {
+      "subject": "glm cuda: hc_pre's decode kernels over more threads, the same bytes (TF_GLM_HC_SPLIT, TF_GLM_HC_PART)",
+      "adapted_from": [
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0086-glue5-0071-glm-decode-hc-finish-split.patch",
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0089-glue5-0074-glm-decode-hc-partial-split.patch",
+        "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0090-pdl5-p0074-glm-pdl-hc-split-waits.patch"
+      ]
+    }
+  ],
+  "build": {
+    "base_image": "nvidia/cuda@sha256:afc92f9727f96346f2912934f11e5a43aa0581aca4a826bd5c8fd4ab6b152bcc",
+    "runtime_image": "nvidia/cuda@sha256:585155539dd4ff2ab653ee59d812aae81a9406a5804596d516c06e3a5719eb26",
+    "zig_version": "0.17.0",
+    "zig_sha256": "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8",
+    "zig_cpu": "cortex_a725+aes-mte-perfmon+sha2+sha3+sm4-spe",
+    "sm": "121"
+  },
+  "weights": {
+    "repository": "Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold",
+    "revision": "078455ffe6472f9a52fbc1139f58b9db2881b25c"
+  },
+  "drafter": {
+    "repository": "incoai/GLM-5.3-Flash-DFlash2",
+    "revision": "bf582e4eacc1810f76656d1811693ff6c6737d2a"
+  }
+}
