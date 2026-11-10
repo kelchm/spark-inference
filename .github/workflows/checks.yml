@@ -12,6 +12,19 @@ permissions:
   attestations: read
 
 jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Runtime generation and off-host qualification tests
+        run: |
+          python3 -m pip install 'sparkrun==0.4.2'
+          python3 tools/render_sparkrun.py recipes/glm53-mia/releases/glm53-mia-2026.11.07.json --check
+          python3 -B -m unittest discover -s tests -v
+
   recipes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
