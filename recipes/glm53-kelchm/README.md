@@ -27,12 +27,12 @@ The profile lives in home-lab's deployment profiles, not here; set it the same o
   - `TF_GLM_HC_FUSE=1`: a prompt call's `hc_post` also writes the next site's `hc_pre` partials.
   - `TF_GLM_SHARED_SLOT=1`: a prompt call's shared-expert down projection writes its MoE slot directly.
   - `TF_GLM_MM_FAST4=1`: 4-bit packed prompt matmuls build their BF16 weight pairs by subtraction, not int-to-float conversions.
+  - `TF_GLM_ROUTER_FUSE=1`: a prompt call's router adds its eight K slices inside one launch, without the slices' scratch or a second launch to sum them.
   - `TF_GLM_COPIES=1`: priority copies of verified roots and context while drafting. It helped replies that re-emit their input with edits and was neutral elsewhere.
   - `TF_GLM_DENSE_PRUNE`: on by default, so leave it unset (`0` turns it off). A chunk's dense attention skips the rows sparse attention overwrites.
   - `TF_GLM_PDL_CHAIN`, `TF_GLM_KDA_STEP_WARPS`, `TF_GLM_HC_SPLIT` and `TF_GLM_HC_PART` stay unset: their defaults are the carried decode kernels.
 - `TF_GLM_DRAFT_CONFIDENCE` stays unset, at its default of 0.7: lower thresholds were slower in every case measured.
-- `TF_GLM_DENSE_BITS`: *to be decided*, 4 or 8. Packing the dense linears to 4 bits at load costs 0.028 nats a token of natural-text NLL against 8; a speed comparison decides it. glm53-mia's profile uses 8.
-- `TF_GLM_HEAD_BITS=8`: the output head packed to 8 bits at load, lossy against the bf16 weights.
+- `TF_GLM_DENSE_BITS=4 TF_GLM_HEAD_BITS=8`: the dense linears packed to 4 bits and the output head to 8 at load, both lossy against the bf16 weights. This is the profile's value, pending the user's decision on the trade-off: 4-bit dense costs 0.028 nats a token of natural-text NLL against 8, while 8-bit dense costs about 18–21% of single-stream decode speed and about 2.4% of cold prompt speed. glm53-mia's profile uses 8 for both.
 - `--kv-cache fp8`.
 - The DFlash2 drafter from `recipe.json` with `--drafter-bits 4`.
 
@@ -46,7 +46,7 @@ Opt-in arithmetic: `TF_GLM_ABSORB_MMA=1` (tensor-core absorb and expand GEMMs, w
 | `--max-tokens` | 32,768 | to be qualified |
 | `--prompt-cache-gib` | 6 (the engine's default is 16) | to be qualified |
 | Conversation reuse | `--learn-conversations`, with `--learn-gib 64 --learn-min-free-gib 50 --learn-daily-gib 128` | to be qualified: `--learn-conversations` or `TF_GLM_REQUEST_STARTS=1`, not both |
-| `TENSORFOLD_PREFILL_SHARE` | 0.68 | to be qualified |
+| `TENSORFOLD_PREFILL_SHARE` | 0.68 | to be decided by the user (see below) |
 | `TENSORFOLD_PREFILL_BUDGET` | unset (no cap) | to be qualified |
 | `TF_HEAT_HIGH`, `TF_HEAT_LOW` | unset (no heat bands) | to be qualified |
 | `TF_GLM_DRAFT_CONFIDENCE` | unset (0.7) | unset (0.7) |
@@ -54,7 +54,7 @@ Opt-in arithmetic: `TF_GLM_ABSORB_MMA=1` (tensor-core absorb and expand GEMMs, w
 
 - **Known limit: four streams at 1M.** At `--parallel 4 --context 1048576` the engine refuses to start: the streams need 21.11 GiB against a 14.66 GiB budget, because this engine keeps fp8 KV only as a window per stream. Until it has paged or sharded fp8 KV, the profile must serve 1M context with `--parallel 2`, or four streams at a shorter context.
 - **Conversation reuse.** `--learn-conversations` keeps each rank's part of a conversation's state on disk ([ashhart/TensorFold#1411](https://github.com/ashhart/TensorFold/pull/1411)); with #1411 the engine refuses `--spill-gib` and `--checkpoint-slots` for GLM, so that disk store is the only one. `TF_GLM_REQUEST_STARTS=1` cuts prompts at message starts, so a chat's next turn resumes at its history ([ashhart/TensorFold#2404](https://github.com/ashhart/TensorFold/pull/2404)). The two are mutually exclusive: the engine refuses `TF_GLM_REQUEST_STARTS=1` at start with `--learn-conversations` (`requestStartsAlone` in `cuda_native.zig`), and also with `TF_KV_SHARE` above 0.
-- **Prefill share and fill budget.** At the default `TENSORFOLD_PREFILL_SHARE` of 1, a long prompt's steps owe decoding streams nothing, so while a cold prompt fills the decoders get only the turns between its steps. A share below 1 gives them time back and finishes the prompt later. `TENSORFOLD_PREFILL_BUDGET` caps the prompt rows filled per pass while a stream waits to decode. See TensorFold's RUNBOOK, "Prompt prefill share, budget and admission policy".
+- **Prefill share and fill budget.** At the default `TENSORFOLD_PREFILL_SHARE` of 1, a long prompt's steps owe decoding streams nothing, so while a cold prompt fills the decoders get only the turns between its steps. A share below 1 gives them time back and finishes the prompt later. Which matters more is a serving-policy choice for the user. Measured on this engine with a cold 112K prompt beside one decoding stream: at the default, the prompt took about 63 s and held the decoder to about 0.9 tokens a second meanwhile; at 0.68, the decoder kept about 6.5 tokens a second and the prompt took about 89 s. `TENSORFOLD_PREFILL_BUDGET` caps the prompt rows filled per pass while a stream waits to decode. See TensorFold's RUNBOOK, "Prompt prefill share, budget and admission policy".
 - **Heat bands.** `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest thermal zone is above the high band, until it is at or under the low one; the reply's tokens do not change. The RUNBOOK's measured example is 92 and 88 on three GB10s at TP=3.
 
 glm53-mia's profile also sets `TENSORFOLD_MEMORY_RESERVE_GIB=12`, `TF_KV_PAGES=on`, `TF_ROCE=1`, `TF_ROCE_MAX_KB=4096` and `TF_GLM_CLEAR_THINKING=0`, which this engine reads too; their values for this lane are to be qualified. Its `TF_GLM_KV_SHARD`, `TF_PROMPT_CACHE_FIRST`, `TF_GLM_HOST_CACHE_GIB`, `TF_GLM_CE_EXCHANGE` and `TF_GLM_W8A8` come from Mia's kit, and this engine ignores them. Request defaults (thinking, reasoning effort, top-k, vision, the chat template) stay with home-lab's profile.
@@ -64,9 +64,9 @@ glm53-mia's profile also sets `TENSORFOLD_MEMORY_RESERVE_GIB=12`, `TF_KV_PAGES=o
 Before a release of this lane is qualified:
 
 1. Capacity: `--parallel 2` at 1M context or `--parallel 4` at a shorter one, then `--max-tokens` and `--prompt-cache-gib`, with the paired 4,096-row solo chunks fitting the memory budget. Four streams at 1M wait on paged or sharded fp8 KV in the engine.
-2. `TF_GLM_DENSE_BITS`, 4 or 8, from the speed comparison.
-3. Conversation reuse: `--learn-conversations` with its sizes, or `TF_GLM_REQUEST_STARTS=1`.
-4. `TENSORFOLD_PREFILL_SHARE` and `TENSORFOLD_PREFILL_BUDGET`, so decoders keep a share of time while a cold prompt fills.
+2. The user's decision on dense bits: keep 4, trading natural-text NLL for decode speed, or take 8.
+3. The user's decision on `TENSORFOLD_PREFILL_SHARE`: a cold prompt's speed against concurrent decoders' speed. Then `TENSORFOLD_PREFILL_BUDGET`.
+4. Conversation reuse: `--learn-conversations` with its sizes, or `TF_GLM_REQUEST_STARTS=1`.
 5. Heat bands.
 6. `TENSORFOLD_MEMORY_RESERVE_GIB`, `TF_KV_PAGES` and the RoCE settings.
 
