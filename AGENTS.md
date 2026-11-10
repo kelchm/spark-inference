@@ -4,7 +4,7 @@ This repository is the front door for models served on the DGX Spark pair. Engin
 
 ## Rules
 
-- **Published images come only from CI on `main`.** Local builds of a Dockerfile are for development and testing; never push them anywhere.
+- **Published images come only from CI on `main`.** Local builds of a Dockerfile are for development and testing; never push them anywhere. `tools/dev_build.sh <engine commit> <lane>` makes one.
 - **Never hand-edit generated or pinned values.** Release files come from `tools/new_release.py`, the README status table from `tools/status.py`, and a lane's engine branch from `tools/kit_import.py` (or upstream TensorFold, for a lane without a kit) plus reviewed commits.
 - **Names follow the README's Naming table.** Lanes are `<model>-<recipe line>` with no versions in them. A release's date is when we promote it.
 - **Engine commits stay upstreamable.** In kelchm/TensorFold, commit under the user's GitHub noreply address with no AI co-author lines (TensorFold's rule). In this repository, end commits with the model's `Co-Authored-By` trailer as usual.
