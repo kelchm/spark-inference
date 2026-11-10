@@ -43,7 +43,7 @@ A release's date is when we promoted it, not when its kit or engine was publishe
 
 ## Layout
 
-- `recipes/<lane>/recipe.json`: the pins for one lane (engine repository and commit, kit, base images, toolchain, weights).
+- `recipes/<lane>/recipe.json`: the pins for one lane (engine repository and commit, kit, base images, toolchain, weights), and our own engine commits on top as `carries`. A lane on upstream TensorFold itself has no `kit`; its carries are every commit above `engine.upstream`.
 - `recipes/<lane>/Dockerfile`: builds that lane's image from its pinned engine commit.
 - `recipes/<lane>/releases/<release>.json`: a promoted build. It pins one published image by digest, repeats the recipe pins of the commit that built it, says what changed, and records qualification (`pending`, `qualified` or `rejected`). Deployments pin a release file. `tools/check_release.py` and the Checks workflow check every release against its recipe commit, the image's labels, its build provenance and the `release/<release>` tag on its engine commit in the fork; release files never trigger a build.
 - `tools/`: `kit_import.py` imports a kit into the engine fork, `new_release.py` writes a release file, `status.py` generates the table above, and `check_recipe.py` and `check_release.py` are what CI checks.

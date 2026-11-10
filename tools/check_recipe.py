@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Check each lane's recipe against the engine fork it pins.
 
-For recipes/<lane>/recipe.json: the engine commit must be on the lane's deploy branch; the kit-notices commit below
-it must name the recipe's kit revision, patch count and upstream engine commit; every patch it names must appear as
-imported commits carrying that kit's Origin trailer; and the commits above the notices commit (our own changes) must
-be exactly the recipe's "carries" list, oldest first. Only commit metadata is fetched.
+For recipes/<lane>/recipe.json: the engine commit must be on the lane's deploy branch. For a lane with a kit, the
+kit-notices commit below it must name the recipe's kit revision, patch count and upstream engine commit, and every
+patch it names must appear as imported commits carrying that kit's Origin trailer; our own changes are the commits
+above the notices commit. A lane without a kit builds on upstream TensorFold itself: the upstream commit must be an
+ancestor of the engine commit, and our own changes are the commits above it. Either way they must be exactly the
+recipe's "carries" list, oldest first, each listing its commit's Adapted-from trailers as "adapted_from". Only commit
+metadata is fetched.
 """
 import json
 from pathlib import Path
@@ -14,21 +17,34 @@ import sys
 import tempfile
 
 DEPTH = 600  # comfortably more than a kit's patch count plus what a lane carries
+ADAPTED = re.compile(r'^Adapted-from: (.+)$', re.M)
 
 
 def git(*args, cwd):
     return subprocess.run(['git', *args], cwd=cwd, check=True, capture_output=True, text=True).stdout
 
 
-def commits(repo, tip):
-    """(sha, subject, body) from tip downward, as far as the shallow fetch reaches."""
-    out = git('log', '--format=%H%x00%s%x00%B%x1e', tip, cwd=repo)
+def commits(repo, revs):
+    """(sha, subject, body) from the tip of revs downward, as far as the shallow fetch reaches."""
+    out = git('log', '--format=%H%x00%s%x00%B%x1e', revs, cwd=repo)
     return [tuple(entry.strip('\n').split('\x00', 2)) for entry in out.split('\x1e') if entry.strip()]
+
+
+def compare_carries(recipe, ours, above):
+    """Problems where our own commits (sha, subject, body), oldest first, differ from the recipe's carries."""
+    subjects = [subject for _, subject, _ in ours]
+    carries = recipe.get('carries', [])
+    carried = [entry.get('subject') for entry in carries]
+    if subjects != carried:
+        return [f'commits above {above} are {subjects}; recipe carries {carried}']
+    return [f"carry {subject!r}: adapted_from is {entry.get('adapted_from', [])}, its commit says {sources}"
+            for (_, subject, body), entry in zip(ours, carries)
+            if (sources := ADAPTED.findall(body)) != entry.get('adapted_from', [])]
 
 
 def check(path):
     recipe = json.loads(path.read_text())
-    lane, engine, kit = path.parent.name, recipe['engine'], recipe['kit']
+    lane, engine, kit = path.parent.name, recipe['engine'], recipe.get('kit')
     problems = []
     if recipe.get('lane') != lane:
         problems.append(f'lane must be {lane}')
@@ -42,6 +58,14 @@ def check(path):
         on_branch = subprocess.run(['git', 'merge-base', '--is-ancestor', engine['commit'], 'refs/lane'], cwd=repo)
         if on_branch.returncode:
             return problems + [f"engine.commit {engine['commit'][:12]} is not on {engine['branch']}"]
+        if kit is None:
+            on_base = subprocess.run(['git', 'merge-base', '--is-ancestor', base, engine['commit']], cwd=repo,
+                                     capture_output=True)
+            if not re.fullmatch(r'[0-9a-f]{40}', base) or on_base.returncode:
+                return problems + [f"engine.upstream {base[:12]!r} is not an ancestor of engine.commit within {DEPTH} "
+                                   'commits']
+            ours = list(reversed(commits(repo, f"{base}..{engine['commit']}")))
+            return problems + compare_carries(recipe, ours, f'upstream {base[:12]}')
         log = commits(repo, engine['commit'])
     notice = f"packaging: carry the {kit['repository']} licence, notice and credits"
     at = next((i for i, (_, subject, _) in enumerate(log) if subject == notice), None)
@@ -55,11 +79,7 @@ def check(path):
     imported = {m.group(1) for _, _, b in log[at + 1:] for m in origin.finditer(b)}
     if len(imported) != kit['patches']:
         problems.append(f"{len(imported)} imported kit patches carry this kit's Origin trailer; recipe says {kit['patches']}")
-    ours = [subject for _, subject, _ in reversed(log[:at])]
-    carried = [entry.get('subject') for entry in recipe.get('carries', [])]
-    if ours != carried:
-        problems.append(f'commits above the kit are {ours}; recipe carries {carried}')
-    return problems
+    return problems + compare_carries(recipe, list(reversed(log[:at])), 'the kit')
 
 
 def main():

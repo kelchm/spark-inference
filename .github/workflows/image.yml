@@ -32,9 +32,10 @@ jobs:
           {
             echo "engine_repo=$(jq -r .engine.repository "$RECIPE")"
             echo "engine_commit=$(jq -r .engine.commit "$RECIPE")"
-            echo "kit_repo=$(jq -r .kit.repository "$RECIPE")"
-            echo "kit_rev=$(jq -r .kit.revision "$RECIPE")"
-            echo "kit_series=$(jq -r .kit.patches_sha256 "$RECIPE")"
+            # A lane without a kit passes the kit arguments empty.
+            echo "kit_repo=$(jq -r '.kit.repository // ""' "$RECIPE")"
+            echo "kit_rev=$(jq -r '.kit.revision // ""' "$RECIPE")"
+            echo "kit_series=$(jq -r '.kit.patches_sha256 // ""' "$RECIPE")"
             echo "base_image=$(jq -r .build.base_image "$RECIPE")"
             echo "runtime_image=$(jq -r .build.runtime_image "$RECIPE")"
             echo "zig_version=$(jq -r .build.zig_version "$RECIPE")"

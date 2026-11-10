@@ -20,11 +20,15 @@ def short(repo_at):
 
 def row(recipe_path):
     recipe = json.loads(recipe_path.read_text())
-    lane, engine, kit = recipe['lane'], recipe['engine'], recipe['kit']
-    builds = (f"{recipe['model']}: {short(kit['repository'] + '@' + kit['revision'])} on TensorFold "
-              f"`{engine['upstream'].rpartition('@')[2][:8]}`")
+    lane, engine, kit = recipe['lane'], recipe['engine'], recipe.get('kit')
+    if kit:
+        builds = (f"{recipe['model']}: {short(kit['repository'] + '@' + kit['revision'])} on TensorFold "
+                  f"`{engine['upstream'].rpartition('@')[2][:8]}`")
+    else:
+        builds = f"{recipe['model']}: upstream {short(engine['upstream'])}"
     carries = recipe.get('carries', [])
-    ours = '<br>'.join(f"{c['subject']}" + (f" ({c['upstream']})" if c.get('upstream') else '') for c in carries) or 'none'
+    ours = '<br>'.join(f"{c['subject']}" + (f" ({c['upstream']})" if c.get('upstream') else '')
+                       + (f" (issue {c['issue']})" if c.get('issue') else '') for c in carries) or 'none'
     releases = sorted(recipe_path.parent.glob('releases/*.json'),
                       key=lambda p: [int(x) for x in p.stem.removeprefix(f'{lane}-').split('.')])
     if releases:

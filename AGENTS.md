@@ -5,7 +5,7 @@ This repository is the front door for models served on the DGX Spark pair. Engin
 ## Rules
 
 - **Published images come only from CI on `main`.** Local builds of a Dockerfile are for development and testing; never push them anywhere.
-- **Never hand-edit generated or pinned values.** Release files come from `tools/new_release.py`, the README status table from `tools/status.py`, and a lane's engine branch from `tools/kit_import.py` plus reviewed commits.
+- **Never hand-edit generated or pinned values.** Release files come from `tools/new_release.py`, the README status table from `tools/status.py`, and a lane's engine branch from `tools/kit_import.py` (or upstream TensorFold, for a lane without a kit) plus reviewed commits.
 - **Names follow the README's Naming table.** Lanes are `<model>-<recipe line>` with no versions in them. A release's date is when we promote it.
 - **Engine commits stay upstreamable.** In kelchm/TensorFold, commit under the user's GitHub noreply address with no AI co-author lines (TensorFold's rule). In this repository, end commits with the model's `Co-Authored-By` trailer as usual.
 - **Imported work keeps its authors.** Never rewrite someone else's commit; put fixes in a separate commit on top. When adapting someone's change, credit them (`Co-authored-by:` for people, an `Adapted-from:` or `Backport-of:` trailer for the source).
@@ -24,8 +24,8 @@ This repository is the front door for models served on the DGX Spark pair. Engin
 
 1. **Upstream first:** branch `contrib/<topic>` from upstream `main`, with a failing test before the fix, following TensorFold's AGENTS.md and pull request pre-flight.
 2. **Backport:** branch `work/<lane>/<topic>` from `deploy/<lane>`, apply the change adapted to the lane's base with a `Backport-of: ashhart/TensorFold#<n>` trailer (or the contrib branch until the pull request exists), and open a pull request into `deploy/<lane>` in the fork.
-3. After it merges, add it to the recipe's `carries` (`subject`, and `upstream` once known), bump `engine.commit`, and open a pull request here.
-4. When upstream or the lane's kit includes the change, drop it at the next kit update and remove it from `carries`.
+3. After it merges, add it to the recipe's `carries` (`subject`; `upstream` once known; `adapted_from` repeating the commit's `Adapted-from:` trailers, which `tools/check_recipe.py` compares), bump `engine.commit`, and open a pull request here.
+4. When upstream or the lane's kit includes the change, drop it at the next kit update (or, for a lane without a kit, the next rebase onto upstream) and remove it from `carries`.
 
 ## Cut a release
 

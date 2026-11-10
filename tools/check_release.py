@@ -3,7 +3,7 @@
 
 A release file is recipes/<lane>/releases/<lane>-<YYYY.MM.DD>[.n].json, .n numbering a second release that day. It must name an existing recipe commit, repeat
 that commit's recipe.json pins exactly, and pin an image digest whose labels record the same lane, recipe commit,
-engine commit and kit. Its engine commit must be tagged release/<release> in the engine fork, so it stays reachable
+engine commit and kit (empty kit labels for a lane without one). Its engine commit must be tagged release/<release> in the engine fork, so it stays reachable
 when the lane's deploy branch is re-imported. Run from a full clone; the registry is read anonymously, so the image
 must be public.
 Provenance is checked separately with `gh attestation verify`.
@@ -73,11 +73,12 @@ def check(path):
         problems.append(f'image must be ghcr.io/kelchm/spark-inference/{lane}@sha256:<digest>')
     elif not problems:
         found = labels(image['repo'], image['digest'])
+        kit = release.get('kit')
         want = {'recipe.lane': lane, 'org.opencontainers.image.revision': commit,
                 'tf.repo': f"https://github.com/{release['engine']['repository']}.git",
-                'tf.ref': release['engine']['commit'], 'tf.kit.repo': release['kit']['repository'],
-                'tf.kit.rev': release['kit']['revision'],
-                'tf.kit.series_sha256': release['kit']['patches_sha256']}
+                'tf.ref': release['engine']['commit'], 'tf.kit.repo': kit['repository'] if kit else '',
+                'tf.kit.rev': kit['revision'] if kit else '',
+                'tf.kit.series_sha256': kit['patches_sha256'] if kit else ''}
         problems += [f'image label {k} is {found.get(k)!r}, expected {v!r}' for k, v in want.items() if found.get(k) != v]
         tagged = fork_tag(release['engine']['repository'], release['release'])
         if tagged != release['engine']['commit']:
