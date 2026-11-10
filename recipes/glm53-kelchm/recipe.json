@@ -4,7 +4,7 @@
   "engine": {
     "repository": "kelchm/TensorFold",
     "branch": "deploy/glm53-kelchm",
-    "commit": "043460e72af776ecb46c367d4f7583392dcaa2fb",
+    "commit": "01b5396a4d3d023128ad77abf7e6f0dbdc8c5d12",
     "upstream": "ashhart/TensorFold@fcf85f7a56cce1956dd131b9973e675b5703c8ba"
   },
   "carries": [
@@ -193,6 +193,12 @@
     },
     {
       "subject": "glm cuda: Leader.chunk's rows go through prompt_cuts.leaderRows at the pass's width"
+    },
+    {
+      "subject": "glm cuda: TF_GLM_ROUTER_FUSE=1 adds a prompt router's K slices inside one launch"
+    },
+    {
+      "subject": "cuda: benchmark the GLM prompt router with and without TF_GLM_ROUTER_FUSE"
     }
   ],
   "build": {
