@@ -4,7 +4,7 @@
   "engine": {
     "repository": "kelchm/TensorFold",
     "branch": "deploy/glm53-kelchm",
-    "commit": "bb70f0a269f4e5b7f18b1f7b1b73eea439225b83",
+    "commit": "043460e72af776ecb46c367d4f7583392dcaa2fb",
     "upstream": "ashhart/TensorFold@fcf85f7a56cce1956dd131b9973e675b5703c8ba"
   },
   "carries": [
@@ -50,6 +50,10 @@
     },
     {
       "subject": "glm cuda: request starts keep GLM's measured 256-token minimum (request_min_chunk), Qwen keeps every start",
+      "upstream": "ashhart/TensorFold#2404"
+    },
+    {
+      "subject": "glm cuda: a kept state carries the chunk starts below it, and rank 0's step rows are the followers'",
       "upstream": "ashhart/TensorFold#2404"
     },
     {
@@ -171,10 +175,25 @@
         "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0089-glue5-0074-glm-decode-hc-partial-split.patch",
         "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104@13f2464 patches/engine/0090-pdl5-p0074-glm-pdl-hc-split-waits.patch"
       ]
+    },
+    {
+      "subject": "glm cuda: a chunk's dense attention stops at the dense limit (TF_GLM_DENSE_PRUNE)"
+    },
+    {
+      "subject": "glm cuda: TF_GLM_SHARED_SLOT=1 has the shared expert's down projection write its MoE slot"
+    },
+    {
+      "subject": "glm cuda: TF_GLM_MM_FAST4=1 decodes 4-bit prompt weight pairs by BF16 subtraction"
+    },
+    {
+      "subject": "cuda contract: the GLM latent write and pooled keys cases register through one helper"
+    },
+    {
+      "subject": "packaging: carry the MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 licence, notice and credits"
+    },
+    {
+      "subject": "glm cuda: Leader.chunk's rows go through prompt_cuts.leaderRows at the pass's width"
     }
-  ],
-  "notices_pending": [
-    "MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104"
   ],
   "build": {
     "base_image": "nvidia/cuda@sha256:afc92f9727f96346f2912934f11e5a43aa0581aca4a826bd5c8fd4ab6b152bcc",
