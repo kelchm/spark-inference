@@ -29,7 +29,9 @@ def row(recipe_path):
         builds = f"{recipe['model']}: upstream {short(engine['upstream'])}"
     carries = recipe.get('carries', [])
     counts = Counter(c.get('upstream') for c in carries)  # first appearance order: the recipe's, oldest first
-    parts = [f'{n} from {upstream}' if upstream else f'{n} not upstream yet' for upstream, n in counts.items()]
+    raised = Counter(c['issue'] for c in carries if c.get('issue') and not c.get('upstream'))
+    pending = ''.join(f' ({n} raised as {issue})' for issue, n in raised.items())
+    parts = [f'{n} from {upstream}' if upstream else f'{n} not upstream yet{pending}' for upstream, n in counts.items()]
     ours = (f"[{len(carries)} commit{'s' if len(carries) > 1 else ''}](recipes/{lane}/recipe.json): {', '.join(parts)}"
             if carries else 'none')
     releases = sorted(recipe_path.parent.glob('releases/*.json'),

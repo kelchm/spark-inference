@@ -35,6 +35,11 @@ def commits(repo, revs):
     return [tuple(entry.strip('\n').split('\x00', 2)) for entry in out.split('\x1e') if entry.strip()]
 
 
+def adapted(body):
+    """The Adapted-from trailers of a commit message: only its last paragraph is the trailer block."""
+    return ADAPTED.findall(body.strip().split('\n\n')[-1])
+
+
 def compare_carries(recipe, ours, above):
     """Problems where our own commits (sha, subject, body), oldest first, differ from the recipe's carries."""
     subjects = [subject for _, subject, _ in ours]
@@ -44,7 +49,7 @@ def compare_carries(recipe, ours, above):
         return [f'commits above {above} are {subjects}; recipe carries {carried}']
     return [f"carry {subject!r}: adapted_from is {entry.get('adapted_from', [])}, its commit says {sources}"
             for (_, subject, body), entry in zip(ours, carries)
-            if (sources := ADAPTED.findall(body)) != entry.get('adapted_from', [])]
+            if (sources := adapted(body)) != entry.get('adapted_from', [])]
 
 
 def check_notices(recipe, repo):

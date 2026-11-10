@@ -23,7 +23,7 @@ grep -q "^${sha}" <<< "$(git ls-remote "${repo}")" \
   || echo "note: ${sha} is not a branch or tag tip on ${repo}; the build fetches it by SHA" >&2
 revision="dev-$(git -C "${root}" rev-parse --short HEAD)"
 [[ -z "$(git -C "${root}" status --porcelain)" ]] || revision+="-dirty"
-tag="tensorfold-dev:${sha:0:12}"
+tag="tensorfold-dev:${lane}-${sha:0:12}"
 start=${SECONDS}
 docker --context "${ctx}" buildx build --load \
   --file "${root}/recipes/${lane}/Dockerfile" \
