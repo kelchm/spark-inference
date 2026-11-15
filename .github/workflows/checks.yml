@@ -12,6 +12,16 @@ permissions:
   attestations: read
 
 jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Off-host qualification tests (stdlib and loopback only)
+        run: python3 -B -m unittest discover -s tests -p 'test_qualification.py' -v
+
   recipes:
     runs-on: ubuntu-latest
     timeout-minutes: 10
