@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [glm53-mia]
+        lane: [glm53-kelchm, glm53-mia]
     permissions:
       contents: read
     uses: ./.github/workflows/image.yml
@@ -36,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [glm53-mia]
+        lane: [glm53-kelchm, glm53-mia]
     permissions:
       contents: read
       packages: write
@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lane: [glm53-mia]
+        lane: [glm53-kelchm, glm53-mia]
     permissions:
       contents: read
       packages: write

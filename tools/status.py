@@ -5,6 +5,7 @@ Writes the table between the status markers in README.md. With --check, changes 
 out of date, so CI can require that it was regenerated.
 """
 import argparse
+from collections import Counter
 import json
 from pathlib import Path
 import sys
@@ -20,11 +21,19 @@ def short(repo_at):
 
 def row(recipe_path):
     recipe = json.loads(recipe_path.read_text())
-    lane, engine, kit = recipe['lane'], recipe['engine'], recipe['kit']
-    builds = (f"{recipe['model']}: {short(kit['repository'] + '@' + kit['revision'])} on TensorFold "
-              f"`{engine['upstream'].rpartition('@')[2][:8]}`")
+    lane, engine, kit = recipe['lane'], recipe['engine'], recipe.get('kit')
+    if kit:
+        builds = (f"{recipe['model']}: {short(kit['repository'] + '@' + kit['revision'])} on TensorFold "
+                  f"`{engine['upstream'].rpartition('@')[2][:8]}`")
+    else:
+        builds = f"{recipe['model']}: upstream {short(engine['upstream'])}"
     carries = recipe.get('carries', [])
-    ours = '<br>'.join(f"{c['subject']}" + (f" ({c['upstream']})" if c.get('upstream') else '') for c in carries) or 'none'
+    counts = Counter(c.get('upstream') for c in carries)  # first appearance order: the recipe's, oldest first
+    raised = Counter(c['issue'] for c in carries if c.get('issue') and not c.get('upstream'))
+    pending = ''.join(f' ({n} raised as {issue})' for issue, n in raised.items())
+    parts = [f'{n} from {upstream}' if upstream else f'{n} not upstream yet{pending}' for upstream, n in counts.items()]
+    ours = (f"[{len(carries)} commit{'s' if len(carries) > 1 else ''}](recipes/{lane}/recipe.json): {', '.join(parts)}"
+            if carries else 'none')
     releases = sorted(recipe_path.parent.glob('releases/*.json'),
                       key=lambda p: [int(x) for x in p.stem.removeprefix(f'{lane}-').split('.')])
     if releases:

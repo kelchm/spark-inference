@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import subprocess
+import sys
 import urllib.request
 
 PINNED = ('model', 'engine', 'kit', 'carries', 'build', 'weights', 'drafter')
@@ -44,6 +45,9 @@ def main():
     commit = args.commit or git('log', '-1', '--format=%H', 'origin/main', '--', recipe_path,
                                 f':(exclude){recipe_path}/releases')
     recipe = json.loads(git('show', f'{commit}:{recipe_path}/recipe.json'))
+    if recipe.get('notices_pending'):
+        sys.exit(f"{commit[:12]}'s image lacks the notices of {', '.join(recipe['notices_pending'])} (notices_pending): "
+                 'move the engine commit to one that carries them first')
     releases = Path(recipe_path, 'releases')
     previous = sorted(releases.glob('*.json'), key=lambda p: [int(x) for x in p.stem.removeprefix(f'{lane}-').split('.')])
     changes = args.changes
