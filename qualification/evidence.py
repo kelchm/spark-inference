@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from . import workload
+from . import coding, gates, host_state, workload
 from .transport import canonical, parse_sse, sha256, strict_json
 
 SCHEMA = 'glm53-qualification/1'
@@ -27,7 +27,11 @@ SKIP = re.compile(r'imprint: (?:saving (\d+) tokens skipped|writing (\d+) tokens
                   r' \(([^)]*)\)')
 CHECK = re.compile(r'imprint: a disk (?:block|state) failed its check')
 STORE = re.compile(r'glm: conversation states on disk in (.+?) '
-                   r"\((\d+) states, (\d+) MiB of (\d+) MiB; (\d+) ranks'? parts\)")
+                   r"\((\d+) states, (\d+) MiB of (\d+) MiB; (\d+) ranks'? parts(?:; [^)]*)?\)")
+MEASURE_PURPOSES = (
+    'measure', 'image-prefix', 'image1-prefix', 'pre-image2-prefix', 'image2-prefix',
+    'effort-render', 'clear-thinking-with', 'clear-thinking-without',
+)
 RANK = {'invalid': 4, 'fail': 3, 'unknown': 2, 'pass': 1}
 
 
@@ -165,11 +169,12 @@ def parse_logs(c, receipts):
 
 
 class Verdict:
-    def __init__(self, root, skew_s=2.0, tolerance=4096):
+    def __init__(self, root, skew_s=2.0, tolerance=4096, *, require_boot_pairing=False):
         self.c = Campaign(root)
         self.p = self.c.plan
         self.skew = timedelta(seconds=skew_s)
         self.tolerance = tolerance
+        self.require_boot_pairing = require_boot_pairing
         self.problems = []
         self.ambiguous_reads = set()
 
@@ -193,7 +198,10 @@ class Verdict:
                     c.sidecar(r, name)
                 except (OSError, ValueError) as error:
                     self.problems.append(str(error))
-            for entry in ([r['artifact']] if r['kind'] == 'log' else []) + r.get('identity', []):
+            artifacts = ([r['artifact']] if r['kind'] == 'log' else []) + r.get('identity', [])
+            if r.get('log_artifact'):
+                artifacts.append(r['log_artifact'])
+            for entry in artifacts:
                 try:
                     c.artifact(entry)
                 except (OSError, ValueError) as error:
@@ -202,11 +210,23 @@ class Verdict:
             return self.report({})
         self.receipts = receipts
         self.measures = {}
+        self.measure_tokens = {}
+        self.measure_history = {}
         for r in receipts:
-            if r['kind'] == 'tokenize' and r['purpose'] in ('measure', 'image-prefix') and 'response' in r['sidecars']:
+            if r['kind'] == 'tokenize' and r['purpose'] in MEASURE_PURPOSES and 'response' in r['sidecars']:
                 try:
                     if r['complete']:
-                        self.measures[(r['purpose'], r['request_sha256'])] = tokenize_result(c.sidecar(r, 'response'))
+                        raw_resp = c.sidecar(r, 'response')
+                        parsed_tok = tokenize_result(raw_resp)
+                        req_hash = (
+                            sha256(c.sidecar(r, 'request'))
+                            if 'request' in r.get('sidecars', {})
+                            else r['request_sha256']
+                        )
+                        key = (r['purpose'], req_hash)
+                        self.measures[key] = parsed_tok
+                        self.measure_tokens[key] = strict_json(raw_resp)['tokens']
+                        self.measure_history.setdefault(key, []).append(parsed_tok)
                 except ValueError:
                     pass
         self.lines, self.coverage, untimed = parse_logs(c, receipts)
@@ -222,11 +242,34 @@ class Verdict:
             durability[f'{session}/{event}'] = worst(*found) if found else 'unknown'
         identity = self.identity()
         first_save = self.first_save()
-        qualification = worst(workload_status, *durability.values(), identity['status'], first_save['status'])
+        host_state_report = host_state.evaluate_boot_pairing(
+            [r for r in receipts if r['kind'] == 'host-state'], campaign=c, all_receipts=receipts,
+        )
+        capacity_report = self.capacity()
+        gates_report = gates.evaluate_gates(
+            c, receipts, self.measures,
+            measure_tokens=self.measure_tokens,
+            measure_history=self.measure_history,
+            log_lines=self.lines,
+            ambiguous_reads=self.ambiguous_reads,
+            skew=self.skew,
+            find_logs=self.found, covered_fn=self.covered, when_fn=when, tolerance=self.tolerance,
+        )
+        performance_report = coding.evaluate_performance(c, receipts, self.measures)
+
+        overall_inputs = [workload_status, *durability.values(), identity['status'], first_save['status']]
+        if host_state_report['status'] == 'fail' or (
+            self.require_boot_pairing and host_state_report['status'] != 'pass'
+        ):
+            overall_inputs.append('fail' if host_state_report['status'] == 'fail' else 'unknown')
+        for section in (capacity_report, gates_report, performance_report):
+            if section['status'] != 'not_run':
+                overall_inputs.append(section['status'])
+        qualification = worst(*overall_inputs)
         image = worst(durability['image/restart'], durability['image-fork/restart'])
         production = 'rejected' if qualification == 'fail' else 'pending_manual_review'
-        notes = []
-        if image == 'fail':
+        notes = list(host_state_report.get('notes') or [])
+        if image == 'fail' or gates_report.get('image_durable', {}).get('status') == 'fail':
             notes.append('Images were not reused from disk after a restart: the release stays production-rejected.')
         if untimed:
             notes.append(f'{untimed} store lines had no timestamp and could not be attributed to a request.')
@@ -235,6 +278,8 @@ class Verdict:
                             'durability': {'status': worst(*durability.values()), 'required': durability,
                                            'probes': probes},
                             'identity': identity, 'large_first_save': first_save,
+                            'host_state': host_state_report, 'capacity': capacity_report,
+                            'gates': gates_report, 'performance': performance_report,
                             'qualification': qualification, 'production': production,
                             'manual_gates': ['actual four-stream capacity and funded cache',
                                              'verified mid-write crash and older-point recovery',
@@ -393,7 +438,7 @@ class Verdict:
         for line in lines:
             candidates = 0
             for r in self.receipts:
-                if r['kind'] != 'chat':
+                if r['kind'] not in ('chat', 'gate') or 'request' not in r.get('sidecars', {}):
                     continue
                 if not when(r['started_at']) - self.skew <= line['ts'] <= when(r['ended_at']) + self.skew:
                     continue
@@ -511,6 +556,58 @@ class Verdict:
             return 'unknown'
         return 'pass' if all(digest in t for t in texts) else 'fail'
 
+    def capacity(self):
+        recs = [r for r in self.receipts if r['kind'] == 'capacity']
+        if not recs:
+            return {'status': 'not_run', 'checks': []}
+        checks = []
+        for r in recs:
+            transport_reasons = []
+            if r.get('complete') is False:
+                transport_reasons.append(f'capacity /health exchange did not complete ({r.get("error")})')
+            if r.get('http_status') is not None and r.get('http_status') != 200:
+                transport_reasons.append(f'capacity /health returned HTTP {r.get("http_status")}')
+            if r.get('models_http_status') is not None and r.get('models_http_status') != 200:
+                transport_reasons.append(f'capacity /v1/models returned HTTP {r.get("models_http_status")}')
+            if r.get('models_error'):
+                transport_reasons.append(f'capacity /v1/models failed ({r.get("models_error")})')
+            try:
+                health_body = self.c.parsed(r, 'health', strict_json)
+            except (ValueError, KeyError) as error:
+                checks.append({'seq': r['seq'], 'status': 'fail',
+                               'reasons': transport_reasons + [f'unreadable health sidecar: {error}']})
+                continue
+            models_body = None
+            if 'models' in r.get('sidecars', {}):
+                try:
+                    models_body = self.c.parsed(r, 'models', strict_json)
+                except ValueError as error:
+                    checks.append({'seq': r['seq'], 'status': 'fail',
+                                   'reasons': transport_reasons + [f'unreadable models sidecar: {error}']})
+                    continue
+            log_text = None
+            if 'log' in r.get('sidecars', {}):
+                log_text = self.c.sidecar(r, 'log').decode('utf-8', 'replace')
+            elif r.get('log_artifact'):
+                log_text = self.c.artifact(r['log_artifact']).decode('utf-8', 'replace')
+            res = host_state.evaluate_capacity(
+                health_body,
+                log_text,
+                models_body,
+                min_pool_tokens=int(r.get('min_pool_tokens', host_state.POOL_FLOOR_4X1M)),
+                expected_streams=int(r.get('expected_streams', host_state.DEFAULT_STREAMS)),
+                expected_context=int(r.get('expected_context', self.p['context'])),
+                expected_model=self.p['model'],
+                learn_gib=r.get('learn_gib'),
+                learn_dir=self.c.manifest['profile']['learn_dir'] if r.get('check_learn_store') else None,
+                check_learn_store=bool(r.get('check_learn_store')),
+                ranks=self.c.manifest['ranks'],
+            )
+            if transport_reasons:
+                res = dict(res, status='fail', reasons=transport_reasons + list(res.get('reasons') or []))
+            checks.append({'seq': r['seq'], **res})
+        return {'status': worst(*(x['status'] for x in checks)), 'checks': checks}
+
     def identity(self):
         events = [r for r in self.receipts if r['kind'] == 'lifecycle' and r['event'] in ('start', 'restart', 'crash')]
         result = {'events': {r['seq']: [r['event'], self.event_identity(r)] for r in events}}
@@ -525,5 +622,5 @@ class Verdict:
         return result
 
 
-def verdict(root, skew_s=2.0, tolerance=4096):
-    return Verdict(root, skew_s, tolerance).run()
+def verdict(root, skew_s=2.0, tolerance=4096, *, require_boot_pairing=False):
+    return Verdict(root, skew_s, tolerance, require_boot_pairing=require_boot_pairing).run()
