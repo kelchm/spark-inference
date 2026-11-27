@@ -240,6 +240,48 @@ class ContractTest(unittest.TestCase):
         idx2 = spec_extra.argv.index("--vision-video-tokens")
         self.assertEqual(spec_extra.argv[idx2 + 1], "64")
 
+    def test_explicit_off_flags_comma_separated_api_keys_and_symlinked_learn_ancestor(self):
+        # 1. THINKING_ENABLED=0 emits --no-thinking; PROMPT_CACHE_GIB=0 still emits --prompt-cache-gib 0
+        env = _base_env(self.tmp, rank="0")
+        env.update(THINKING_ENABLED="0", PROMPT_CACHE_GIB="0")
+        spec = contract.build_launch_spec(env, sysfs_ib_dir=self.sysfs)
+        self.assertIn("--no-thinking", spec.argv)
+        self.assertNotIn("--thinking", spec.argv)
+        self.assertNotIn("--reasoning-effort", spec.argv)
+        pc_idx = spec.argv.index("--prompt-cache-gib")
+        self.assertEqual(spec.argv[pc_idx + 1], "0")
+
+        # 2. Comma-separated TENSORFOLD_API_KEY parses like auth.zig and redacts every member
+        raw_keys = " , alpha-secret-1111 \t, \n beta-secret-2222 , "
+        self.assertEqual(contract.parse_api_keys(raw_keys), ("alpha-secret-1111", "beta-secret-2222"))
+        self.assertEqual(contract.primary_api_key(raw_keys), "alpha-secret-1111")
+        scrubbed = contract.redact_secrets(
+            "leaked alpha-secret-1111 and beta-secret-2222",
+            env={"TENSORFOLD_API_KEY": raw_keys},
+        )
+        self.assertNotIn("alpha-secret-1111", scrubbed)
+        self.assertNotIn("beta-secret-2222", scrubbed)
+
+        # 3. Symlinked ancestor pointing at HF_HOME or tensorfold-spill is refused even when GLM_LEARN_ROOT is unset
+        base_no_root = _base_env(self.tmp, rank="0")
+        base_no_root["GLM_LEARN_ROOT"] = ""
+        hf_alias = self.tmp / "alias_parent"
+        hf_alias.symlink_to(Path(base_no_root["HF_HOME"]).parent)
+        hf_name = Path(base_no_root["HF_HOME"]).name
+        with self.assertRaisesRegex(ValueError, "forbidden"):
+            contract.build_launch_spec(
+                dict(base_no_root, GLM_LEARN_DIR=str(hf_alias / hf_name)), sysfs_ib_dir=self.sysfs
+            )
+        spill_real = self.tmp / "tensorfold-spill"
+        spill_real.mkdir()
+        spill_alias = self.tmp / "innocent_mount"
+        spill_alias.symlink_to(spill_real)
+        with self.assertRaisesRegex(ValueError, "forbidden"):
+            contract.build_launch_spec(
+                dict(base_no_root, GLM_LEARN_DIR=str(spill_alias / "new-run")), sysfs_ib_dir=self.sysfs
+            )
+        self.assertFalse((spill_real / "new-run").exists())
+
 
 class MemGuardTest(unittest.TestCase):
     def setUp(self):
@@ -303,6 +345,52 @@ class MemGuardTest(unittest.TestCase):
         )
         self.assertIsNotNone(nested.cgroup_available_gib)
         self.assertLess(nested.effective_gib, 2.0)
+
+    def test_finite_cgroup_max_with_unreadable_or_malformed_current_fails_closed(self):
+        meminfo = self.tmp / "meminfo"
+        zoneinfo = self.tmp / "zoneinfo"
+        meminfo.write_text(f"MemTotal: {128 * 1024 * 1024} kB\nMemAvailable: {100 * 1024 * 1024} kB\n")
+        zoneinfo.write_text("")
+        # 1. Direct path: finite memory.max with missing memory.current raises RuntimeError
+        cmax = self.tmp / "finite.max"
+        cmax.write_text(str(8 * memguard.GIB))
+        with self.assertRaises(RuntimeError):
+            memguard.sample_memory(
+                meminfo, zoneinfo, page_size=4096,
+                cgroup_max_path=cmax, cgroup_current_path=self.tmp / "missing.current",
+                proc_cgroup_path=self.tmp / "no_proc_cg", cgroup_root_path=self.tmp / "no_cg_root",
+            )
+        # 2. Direct path: finite memory.max with malformed memory.current raises ValueError
+        bad_cur = self.tmp / "bad.current"
+        bad_cur.write_text("not-a-number\n")
+        with self.assertRaises(ValueError):
+            memguard.sample_memory(
+                meminfo, zoneinfo, page_size=4096,
+                cgroup_max_path=cmax, cgroup_current_path=bad_cur,
+                proc_cgroup_path=self.tmp / "no_proc_cg", cgroup_root_path=self.tmp / "no_cg_root",
+            )
+        # 3. Hierarchy walk: finite ancestor memory.max with unreadable/malformed memory.current triggers sample_error
+        cg_root = self.tmp / "cg_fail"
+        parent = cg_root / "kubepods.slice" / "pod2"
+        leaf = parent / "ctr2"
+        leaf.mkdir(parents=True)
+        (leaf / "memory.max").write_text("max\n")
+        (parent / "memory.max").write_text(str(4 * memguard.GIB))
+        # No parent/memory.current file exists
+        proc_cg = self.tmp / "proc_cg_fail"
+        proc_cg.write_text("0::/kubepods.slice/pod2/ctr2\n")
+        guard = memguard.MemGuard(
+            floor_gib=2.5,
+            sustain_s=4.0,
+            sampler=lambda: memguard.sample_memory(
+                meminfo, zoneinfo, page_size=4096,
+                cgroup_max_path=self.tmp / "no_max", cgroup_current_path=self.tmp / "no_cur",
+                proc_cgroup_path=proc_cg, cgroup_root_path=cg_root,
+            ),
+        )
+        status, reason = guard.check(0.0)
+        self.assertEqual(status, "sample_error")
+        self.assertIn("memory.current", reason or "")
 
     def test_sustained_breach_transient_recovery_and_sample_error(self):
         readings = iter([
@@ -807,6 +895,42 @@ class HealthProbeTest(unittest.TestCase):
         finally:
             rsrv.shutdown()
             rsrv.server_close()
+
+    def test_probe_uses_first_comma_separated_key_redacts_all_members_and_requires_models_context(self):
+        # 1. evaluate_models fails when expected_context is given but entry omits context_length and max_model_len
+        ok_missing, rep_missing = health.evaluate_models(
+            200,
+            {"data": [{"id": "GLM-5.3-Flash"}]},
+            expected_model="GLM-5.3-Flash",
+            expected_context=1_048_576,
+        )
+        self.assertFalse(ok_missing, rep_missing)
+        self.assertIn("context_length", rep_missing["reason"])
+
+        # 2. Comma-separated TENSORFOLD_API_KEY authenticates with first non-empty key and redacts all members
+        srv, url, auths = self._serve({
+            "/health": (200, {
+                "status": "ok",
+                "model": "echo-second-key-9999",
+                "max_batch_size": 4,
+                "warming": False,
+            }),
+        })
+        try:
+            ok, rep = health.probe(
+                url=url,
+                mode="ready",
+                api_key=" , first-key-1111 , second-key-9999 ",
+                expected_model="GLM-5.3-Flash",
+            )
+            self.assertFalse(ok)
+            self.assertEqual(auths, ["Bearer first-key-1111"])
+            dumped = json.dumps(rep)
+            self.assertNotIn("first-key-1111", dumped)
+            self.assertNotIn("second-key-9999", dumped)
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
 
 if __name__ == "__main__":

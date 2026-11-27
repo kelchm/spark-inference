@@ -148,6 +148,8 @@ class Stream:
             raise ValueError('inconsistent total_tokens')
         details = usage.get('prompt_tokens_details')
         cached = details.get('cached_tokens') if isinstance(details, dict) else None
+        if cached is None and 'cached_tokens' in usage:
+            cached = usage.get('cached_tokens')
         if cached is not None and (type(cached) is not int or not 0 <= cached <= usage['prompt_tokens']):
             raise ValueError('invalid cached_tokens')
         message = dict(self.message)

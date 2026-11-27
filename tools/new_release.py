@@ -43,7 +43,7 @@ def main():
     lane, recipe_path = args.lane, f'recipes/{args.lane}'
     git('fetch', '-q', 'origin', 'main')
     commit = args.commit or git('log', '-1', '--format=%H', 'origin/main', '--', recipe_path, 'runtime',
-                                '.dockerignore', f':(exclude){recipe_path}/releases')
+                                '.dockerignore', '.github/workflows', f':(exclude){recipe_path}/releases')
     recipe = json.loads(git('show', f'{commit}:{recipe_path}/recipe.json'))
     if recipe.get('notices_pending'):
         sys.exit(f"{commit[:12]}'s image lacks the notices of {', '.join(recipe['notices_pending'])} (notices_pending): "
@@ -55,7 +55,8 @@ def main():
         if previous:
             since = json.loads(previous[-1].read_text())['recipe_commit']
             changes = '; '.join(git('log', '--reverse', '--format=%s', f'{since}..{commit}', '--', recipe_path,
-                                    'runtime', '.dockerignore', f':(exclude){recipe_path}/releases').splitlines()) or 'No recipe changes; republished.'
+                                    'runtime', '.dockerignore', '.github/workflows',
+                                    f':(exclude){recipe_path}/releases').splitlines()) or 'No recipe changes; republished.'
         else:
             changes = 'First release of this lane.'
     name = f"{lane}-{datetime.now(timezone.utc):%Y.%m.%d}"

@@ -4,7 +4,7 @@
   "engine": {
     "repository": "kelchm/TensorFold",
     "branch": "deploy/glm53-kelchm",
-    "commit": "e0fd8b1eb33e07d55afeb2e3bb2a5700212b9d06",
+    "commit": "54cd73d425c5cec0117059ac1777a13db39f5c63",
     "upstream": "ashhart/TensorFold@a681f00387a0c3eb6d24789cd196f10e015fe853"
   },
   "carries": [
@@ -73,6 +73,9 @@
     },
     {
       "subject": "packaging: carry the MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 licence, notice and credits"
+    },
+    {
+      "subject": "glm tests: pass st.pool to prompt_pair.ringsAgree in tf-cuda-test"
     }
   ],
   "build": {

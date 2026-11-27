@@ -6,6 +6,7 @@ TTFT, and SSE event-arrival inter-event latency tail metrics offline from record
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import threading
 from typing import Any, Callable, Mapping
 
@@ -368,8 +369,14 @@ def run_concurrency(
             body, _, meta = coding_turn_body(plan, tag, 0, chunks=chunks_per_stream, chunk_start=0)
             payloads.append((idx, canonical(body), meta))
 
+        barrier = threading.Barrier(level)
+
         def fire(item: tuple[int, bytes, dict[str, Any]]) -> tuple[int, bytes, dict[str, Any], dict[str, Any]]:
             idx, req_bytes, meta = item
+            try:
+                barrier.wait(timeout=min(10.0, deadline))
+            except threading.BrokenBarrierError:
+                pass
             res = exchange(endpoint, 'POST', '/v1/chat/completions', req_bytes, deadline, stream=True,
                            max_bytes=chat_limit, api_key=api_key)
             return idx, req_bytes, meta, res
@@ -659,6 +666,75 @@ def _eval_cold_concurrent(
     }
 
 
+def _parse_iso_epoch_s(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def _stream_wall_interval(sinfo: Mapping[str, Any]) -> tuple[float, float] | None:
+    ms, me = sinfo.get('mono_start_s'), sinfo.get('mono_end_s')
+    if isinstance(ms, (int, float)) and isinstance(me, (int, float)) and not isinstance(ms, bool) and not isinstance(me, bool):
+        if float(me) >= float(ms):
+            return float(ms), float(me)
+    ts, te = _parse_iso_epoch_s(sinfo.get('started_at')), _parse_iso_epoch_s(sinfo.get('ended_at'))
+    if ts is not None and te is not None and te >= ts:
+        return ts, te
+    return None
+
+
+def _stream_decode_interval(sinfo: Mapping[str, Any], metrics: Mapping[str, Any]) -> tuple[float, float] | None:
+    fs, ls = sinfo.get('first_event_mono_s'), sinfo.get('last_event_mono_s')
+    if isinstance(fs, (int, float)) and isinstance(ls, (int, float)) and not isinstance(fs, bool) and not isinstance(ls, bool):
+        if float(ls) >= float(fs):
+            return float(fs), float(ls)
+    ttft = metrics.get('ttft_s')
+    dec = metrics.get('decode_s')
+    if isinstance(ttft, (int, float)) and isinstance(dec, (int, float)):
+        base = sinfo.get('mono_start_s')
+        if isinstance(base, (int, float)) and not isinstance(base, bool):
+            return float(base) + float(ttft), float(base) + float(ttft) + max(0.0, float(dec))
+        ts = _parse_iso_epoch_s(sinfo.get('started_at'))
+        if ts is not None:
+            return ts + float(ttft), ts + float(ttft) + max(0.0, float(dec))
+    return None
+
+
+def _max_concurrency_and_span(intervals: list[tuple[float, float]]) -> tuple[int, float]:
+    """Sweep-line maximum overlap count and shared wall span across [start, end] intervals.
+
+    End events sort before start events at the same timestamp so touching disjoint intervals [a, b] and [b, c]
+    count as concurrency 1, not 2. Zero-width intervals [t, t] contribute 1 at instant t.
+    """
+    if not intervals:
+        return 0, 0.0
+    events: list[tuple[float, int]] = []
+    min_s = min(s for s, _ in intervals)
+    max_e = max(e for _, e in intervals)
+    for start, end in intervals:
+        if end > start:
+            events.append((start, 1))
+            events.append((end, -1))
+        else:
+            events.append((start, 1))
+            events.append((start, 2))  # sentinel processed after start to decrement zero-width point
+    # Order: real ends (-1) before starts (+1) before point-ends (2 -> -1) at equal timestamps.
+    events.sort(key=lambda item: (item[0], item[1]))
+    active = 0
+    peak = 0
+    for _, delta in events:
+        if delta == 2:
+            active -= 1
+        else:
+            active += delta
+            if active > peak:
+                peak = active
+    return peak, round(max(0.0, max_e - min_s), 6)
+
+
 def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[str, Any]]) -> dict[str, Any]:
     if not recs:
         return {'status': 'not_run', 'levels': {}, 'pi_buckets': {}}
@@ -673,6 +749,9 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
         all_gaps_ms: list[float] = []
         ttfts: list[float] = []
         tok_rates: list[float] = []
+        wall_intervals: list[tuple[float, float]] = []
+        decode_intervals: list[tuple[float, float]] = []
+        total_completion_tokens = 0
         starvation_events = 0
         starved_streams = 0
         passed = 0
@@ -710,6 +789,13 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
             if metrics['ttft_s'] is not None:
                 ttfts.append(metrics['ttft_s'])
             tok_rates.append(metrics['decode_tok_s'])
+            total_completion_tokens += int(metrics['completion_tokens'])
+            wall_iv = _stream_wall_interval(sinfo)
+            if wall_iv is not None:
+                wall_intervals.append(wall_iv)
+            dec_iv = _stream_decode_interval(sinfo, metrics)
+            if dec_iv is not None:
+                decode_intervals.append(dec_iv)
             starvation_events += metrics['starvation_events']
             if metrics['starvation_events'] > 0:
                 starved_streams += 1
@@ -724,6 +810,26 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
             })
 
         total = len(stream_reports)
+        max_concurrent_wall, shared_wall_s = _max_concurrency_and_span(wall_intervals)
+        max_concurrent_decode, shared_decode_s = _max_concurrency_and_span(decode_intervals)
+        level_reasons: list[str] = []
+        if total != level or passed != level:
+            level_reasons.append(f'only {passed} of {level} streams passed (recorded {total})')
+        if starved_streams > 0:
+            level_reasons.append(f'{starved_streams} stream(s) experienced decode starvation (> {starvation_ms} ms)')
+        if level > 1:
+            if max_concurrent_wall < level:
+                level_reasons.append(
+                    f'streams did not execute concurrently: max_concurrent_streams={max_concurrent_wall} < {level}'
+                )
+            elif len(decode_intervals) == level and max_concurrent_decode < level:
+                level_reasons.append(
+                    f'streams did not overlap during active decode: '
+                    f'max_concurrent_decode_streams={max_concurrent_decode} < {level}'
+                )
+
+        shared_elapsed_s = shared_decode_s if shared_decode_s > 0 else shared_wall_s
+        aggregate_decode_tok_s = round(total_completion_tokens / shared_elapsed_s, 3) if shared_elapsed_s > 0 else 0.0
         max_rate = max(tok_rates) if tok_rates else 0.0
         min_rate = min(tok_rates) if tok_rates else 0.0
         fairness = round(min_rate / max_rate, 3) if max_rate > 0 else 0.0
@@ -734,7 +840,10 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
             'streams_total': total,
             'streams_passed': passed,
             'all_correct': total == level and passed == level,
-            'aggregate_decode_tok_s': round(sum(tok_rates), 3),
+            'max_concurrent_streams': max_concurrent_wall,
+            'max_concurrent_decode_streams': max_concurrent_decode,
+            'shared_elapsed_s': shared_elapsed_s,
+            'aggregate_decode_tok_s': aggregate_decode_tok_s,
             'per_stream_decode_tok_s': {
                 'min': round(min_rate, 3),
                 'median': percentile(tok_rates, 50),
@@ -757,7 +866,8 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
             'starvation_threshold_ms': starvation_ms,
             'starvation_events': starvation_events,
             'starved_streams': starved_streams,
-            'status': 'pass' if (total == level and passed == level and starved_streams == 0) else 'fail',
+            'reasons': level_reasons,
+            'status': 'pass' if not level_reasons else 'fail',
             'streams': stream_reports,
         }
         _merge_attempt(levels_out, level_attempts, str(level), level_report)

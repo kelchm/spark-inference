@@ -67,21 +67,34 @@ def _parse_cgroup_v2_path(proc_cgroup_text: str) -> str | None:
     return None
 
 
-def _read_cgroup_dir_available_bytes(cg_dir: Path) -> int | None:
+def _read_cgroup_pair_available_bytes(memory_max: Path, memory_current: Path) -> int | None:
     try:
-        max_text = (cg_dir / "memory.max").read_text().strip()
-        if not max_text or max_text == "max" or not max_text.isascii() or not max_text.isdigit():
-            return None
-        cur_text = (cg_dir / "memory.current").read_text().strip()
-        if not cur_text or not cur_text.isascii() or not cur_text.isdigit():
-            return None
+        max_text = memory_max.read_text().strip()
     except OSError:
         return None
+    if not max_text or max_text == "max" or not max_text.isascii() or not max_text.isdigit():
+        return None
     limit_bytes = int(max_text)
-    current_bytes = int(cur_text)
     if limit_bytes <= 0:
         return None
-    return max(0, limit_bytes - current_bytes)
+    # Finite positive memory.max is active: fail closed if memory.current is unreadable or malformed.
+    try:
+        cur_text = memory_current.read_text().strip()
+    except OSError as err:
+        raise RuntimeError(
+            f"Finite cgroup memory.max ({limit_bytes}) at {memory_max} "
+            f"but memory.current at {memory_current} is unreadable: {err}"
+        ) from err
+    if not cur_text or not cur_text.isascii() or not cur_text.isdigit():
+        raise ValueError(
+            f"Finite cgroup memory.max ({limit_bytes}) at {memory_max} "
+            f"but memory.current at {memory_current} is malformed: {cur_text!r}"
+        )
+    return max(0, limit_bytes - int(cur_text))
+
+
+def _read_cgroup_dir_available_bytes(cg_dir: Path) -> int | None:
+    return _read_cgroup_pair_available_bytes(cg_dir / "memory.max", cg_dir / "memory.current")
 
 
 def cgroup_available_gib(
@@ -95,16 +108,9 @@ def cgroup_available_gib(
     headrooms: list[int] = []
 
     # Direct paths (supports explicit overrides and flat cgroup-namespace mounts).
-    try:
-        max_text = memory_max.read_text().strip()
-        if max_text and max_text != "max" and max_text.isascii() and max_text.isdigit():
-            cur_text = memory_current.read_text().strip()
-            if cur_text and cur_text.isascii() and cur_text.isdigit():
-                limit_bytes = int(max_text)
-                if limit_bytes > 0:
-                    headrooms.append(max(0, limit_bytes - int(cur_text)))
-    except OSError:
-        pass
+    direct = _read_cgroup_pair_available_bytes(memory_max, memory_current)
+    if direct is not None:
+        headrooms.append(direct)
 
     # Walk the process cgroup hierarchy from leaf up to cgroup_root so a tighter parent cap is never missed.
     try:
@@ -244,7 +250,7 @@ class MemGuard:
         """
         try:
             sample = self.sampler()
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError, RuntimeError) as error:
             return "sample_error", f"cannot sample memory telemetry: {error}"
         self.last_sample = sample
         if sample.effective_gib < self.floor_gib:

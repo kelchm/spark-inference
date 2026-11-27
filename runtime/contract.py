@@ -233,16 +233,48 @@ def parse_rdma_hcas(
     return tuple(devices)
 
 
+_ASCII_WS = " \t\r\n\x0b\x0c"
+
+
+def parse_api_keys(raw: str | None) -> tuple[str, ...]:
+    """Parse comma-separated API keys matching TensorFold auth.zig (split ',', trim ASCII whitespace, skip empty)."""
+    if not raw:
+        return ()
+    keys: list[str] = []
+    for part in raw.split(","):
+        key = part.strip(_ASCII_WS)
+        if key:
+            keys.append(key)
+    return tuple(keys)
+
+
+def primary_api_key(raw: str | None) -> str | None:
+    """Return the first non-empty API key from a single or comma-separated key string, or None."""
+    keys = parse_api_keys(raw)
+    return keys[0] if keys else None
+
+
 def redact_secrets(text: str, env: Mapping[str, str] | None = None, extra_secrets: tuple[str, ...] = ()) -> str:
-    """Scrub bearer tokens and secret env values from diagnostic strings."""
+    """Scrub bearer tokens and secret env values (including comma-separated key members) from diagnostic strings."""
     cleaned = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+", r"\1<redacted>", text)
     cleaned = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1<redacted>", cleaned)
-    candidates: list[str] = list(extra_secrets)
+    candidates: list[str] = []
+
+    def _add_secret(val: str | None) -> None:
+        if not val:
+            return
+        if len(val) >= 4:
+            candidates.append(val)
+        if "," in val:
+            for member in parse_api_keys(val):
+                if len(member) >= 4:
+                    candidates.append(member)
+
+    for extra in extra_secrets:
+        _add_secret(extra)
     if env is not None:
         for key in SECRET_ENV_NAMES:
-            val = env.get(key)
-            if val and len(val) >= 4:
-                candidates.append(val)
+            _add_secret(env.get(key))
     for secret in sorted(set(candidates), key=len, reverse=True):
         if secret:
             cleaned = cleaned.replace(secret, "<redacted>")
@@ -325,6 +357,23 @@ def _validate_mounts(
         learn_gib = _int_env(env, "GLM_LEARN_GIB", 64, minimum=1, maximum=1024)
         learn_min_free_gib = _int_env(env, "GLM_LEARN_MIN_FREE_GIB", 50, minimum=1, maximum=1024)
         learn_daily_gib = _int_env(env, "GLM_LEARN_DAILY_GIB", 128, minimum=1, maximum=4096)
+        if verify_mounts:
+            # Also apply /, HF_HOME, and FORBIDDEN_LEARN_NAMES checks to the resolved target path so a symlinked
+            # ancestor cannot redirect persistence even when GLM_LEARN_ROOT is unset.
+            resolved_learn = (
+                learn_dir.resolve()
+                if (learn_dir.exists() or learn_dir.is_symlink())
+                else (learn_dir.parent.resolve() / learn_dir.name)
+            )
+            resolved_hf = hf_home.resolve()
+            if resolved_learn == Path("/") or resolved_learn == resolved_hf:
+                raise ValueError(
+                    f"GLM_LEARN_DIR {learn_dir} resolves to forbidden directory {resolved_learn}"
+                )
+            if any(part.lower() in FORBIDDEN_LEARN_NAMES for part in resolved_learn.parts):
+                raise ValueError(
+                    f"GLM_LEARN_DIR {learn_dir} resolves to a forbidden legacy spill path: {resolved_learn}"
+                )
         if verify_mounts and rank == 0:
             if learn_dir.is_symlink():
                 raise ValueError(f"GLM_LEARN_DIR must not be a symlink: {learn_dir}")
@@ -614,6 +663,8 @@ def build_launch_spec(
 
     if thinking_enabled:
         argv += ["--thinking", "--reasoning-effort", reasoning_effort]
+    else:
+        argv.append("--no-thinking")
     if top_k > 0:
         argv += ["--top-k", str(top_k)]
     argv.append("--no-update-check")
@@ -629,8 +680,7 @@ def build_launch_spec(
         argv += ["--drafter", mounts.drafter, "--drafter-bits", str(drafter_bits)]
     else:
         argv.append("--no-drafts")
-    if prompt_cache_gib > 0:
-        argv += ["--prompt-cache-gib", str(prompt_cache_gib)]
+    argv += ["--prompt-cache-gib", str(prompt_cache_gib)]
     if mounts.learn_enabled and mounts.learn_dir is not None:
         argv += [
             "--learn-conversations",

@@ -15,7 +15,9 @@ from .contract import (  # noqa: E402
     MountContract,
     RdmaConfig,
     build_launch_spec,
+    parse_api_keys,
     parse_rdma_hcas,
+    primary_api_key,
     redact_secrets,
     sanitize_argv,
 )
@@ -42,7 +44,9 @@ __all__ = [
     "build_launch_spec",
     "cgroup_available_gib",
     "parked_bytes",
+    "parse_api_keys",
     "parse_rdma_hcas",
+    "primary_api_key",
     "redact_secrets",
     "sanitize_argv",
 ]

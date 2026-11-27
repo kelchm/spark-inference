@@ -1,6 +1,6 @@
 # GLM-5.3-Flash on two DGX Sparks, our own recipe
 
-The engine is [`deploy/glm53-kelchm`](https://github.com/kelchm/TensorFold/tree/deploy/glm53-kelchm) in kelchm/TensorFold: upstream TensorFold `v1.3.6` (`a681f003`) with no kit, plus the 22 commits listed in [recipe.json](recipe.json)'s `carries`, oldest first. They port paged FP8 KV and cross-page disk save/restore onto `v1.3.6`, persist unsalted image conversation metadata in the rows disk store, allow `TF_GLM_REQUEST_STARTS=1` alongside `--learn-conversations` via format-2 disk headers carrying the `below` cut digest, and add our verified bit-exact P5 GLM CUDA prompt, decode, DFlash2, and TP2 RoCE optimizations.
+The engine is [`deploy/glm53-kelchm`](https://github.com/kelchm/TensorFold/tree/deploy/glm53-kelchm) in kelchm/TensorFold: upstream TensorFold `v1.3.6` (`a681f003`) with no kit, plus the 23 commits listed in [recipe.json](recipe.json)'s `carries`, oldest first. They port paged FP8 KV and cross-page disk save/restore onto `v1.3.6`, persist unsalted image conversation metadata in the rows disk store, allow `TF_GLM_REQUEST_STARTS=1` alongside `--learn-conversations` via format-2 disk headers carrying the `below` cut digest, and add our verified bit-exact P5 GLM CUDA prompt, decode, DFlash2, and TP2 RoCE optimizations.
 
 `tools/check_recipe.py` checks that the commits above `engine.upstream` are exactly that list. [recipe.json](recipe.json) also pins base images and toolchain (`zig 0.17.0`, `sm=121`, `libjpeg-turbo 3.1.4.1`, `libwebp 1.6.0`, `xgrammar v0.2.8`), which the image build uses, and the weights and drafter revisions, which it does not: they are what a deployment of this image must load, and qualification receipts name them.
 
@@ -78,7 +78,7 @@ This mounts `prebuilt-fatbins` into the `build` stage and passes `-Dfatbins` / `
 Once this `v1.3.6` P5 recipe merges to `main` and CI publishes `ghcr.io/kelchm/spark-inference/glm53-kelchm:sha-<commit>` with its build provenance attestation:
 
 1. Run `python3 tools/new_release.py glm53-kelchm` to write `recipes/glm53-kelchm/releases/glm53-kelchm-<date>.json` and refresh the README status table.
-2. Create and push the printed `release/<release>` tag on `e0fd8b1eb33e07d55afeb2e3bb2a5700212b9d06` in `kelchm/TensorFold`, then verify with `python3 tools/check_release.py`.
+2. Create and push the printed `release/<release>` tag on `54cd73d425c5cec0117059ac1777a13db39f5c63` in `kelchm/TensorFold`, then verify with `python3 tools/check_release.py`.
 3. Record home-lab's qualification receipt on the release file per [AGENTS.md](../../AGENTS.md) after deploying and running the expanded [qualification/](../../qualification/) suite against the published image digest.
 
 Qualification receipts live with each release, in its `qualification.receipt`. This lane has no release yet.

@@ -16,7 +16,7 @@ from typing import Any, Mapping
 import urllib.error
 import urllib.request
 
-from .contract import redact_secrets
+from .contract import parse_api_keys, primary_api_key, redact_secrets
 
 DEFAULT_STATE_FILE = "/tmp/tensorfold-runtime-state.json"
 POOL_FLOOR_4X1M = 2_582_528
@@ -191,14 +191,23 @@ def evaluate_models(
         }
     entry = entries[0]
     if expected_context is not None:
+        found_context = False
         for field in ("context_length", "max_model_len"):
             val = entry.get(field)
-            if val is not None and val != expected_context:
-                return False, {
-                    "ok": False,
-                    "http_status": status_code,
-                    "reason": f"/v1/models {field}={val!r}, expected {expected_context}",
-                }
+            if val is not None:
+                found_context = True
+                if type(val) is not int or val != expected_context:
+                    return False, {
+                        "ok": False,
+                        "http_status": status_code,
+                        "reason": f"/v1/models {field}={val!r}, expected {expected_context}",
+                    }
+        if not found_context:
+            return False, {
+                "ok": False,
+                "http_status": status_code,
+                "reason": f"/v1/models omits both context_length and max_model_len (expected {expected_context})",
+            }
     if expected_efforts:
         reported = list((entry.get("reasoning") or {}).get("supported_efforts") or [])
         if reported != list(expected_efforts):
@@ -319,7 +328,8 @@ def probe(
     env: Mapping[str, str] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """Run one readiness/liveness/worker probe with full secret redaction across all emitted fields."""
-    extra_secrets = (api_key,) if api_key else ()
+    auth_key = primary_api_key(api_key)
+    extra_secrets = ((api_key,) + parse_api_keys(api_key)) if api_key else ()
     if mode == "worker" or mode == "worker-live":
         ok, rep = check_worker_state(state_file, mode="live" if mode == "worker-live" else "ready")
         return ok, _redact_obj(rep, env=env, extra_secrets=extra_secrets)
@@ -327,7 +337,7 @@ def probe(
     base = url.rstrip("/").removesuffix("/v1")
     startup_log = Path(startup_log_path).read_text() if startup_log_path else None
     try:
-        code, body = _fetch_json(base + "/health", timeout=timeout, api_key=api_key)
+        code, body = _fetch_json(base + "/health", timeout=timeout, api_key=auth_key)
     except Exception as err:
         return False, _redact_obj(
             {"ok": False, "reason": f"{type(err).__name__}: {err}"}, env=env, extra_secrets=extra_secrets
@@ -347,7 +357,7 @@ def probe(
 
     if check_models and expected_model:
         try:
-            mcode, mbody = _fetch_json(base + "/v1/models", timeout=timeout, api_key=api_key)
+            mcode, mbody = _fetch_json(base + "/v1/models", timeout=timeout, api_key=auth_key)
         except Exception as err:
             return False, _redact_obj(
                 {"ok": False, "health": detail, "reason": f"{type(err).__name__}: {err}"},

@@ -608,9 +608,43 @@ def _eval_dense_sparse(
             if not correct:
                 reasons.append('wrong or missing dense-sparse answer')
 
-        extra: dict[str, Any] = {'reuse_scope': 'in_memory_partial_page_4'} if case == 'page-reuse' else {}
+        extra: dict[str, Any] = {}
         unknown_evidence = False
-        if case == 'restart-restore':
+        if case == 'page-reuse':
+            floor = DENSE_RESTORE_PAGE_FLOOR
+            cached = reply.get('cached_tokens') if reply is not None else None
+            c_start, c_end = when_fn(rec['started_at']), when_fn(rec['ended_at'])
+            reads = (
+                find_logs('read', c_start, c_end, floor, measured_count)
+                if measured_count is not None
+                else []
+            )
+            reuse_scope = 'unknown'
+            reuse_evidence: str | None = None
+            if measured_count is not None and cached is not None and floor <= cached <= measured_count:
+                reuse_scope = 'in_memory_partial_page_4'
+                reuse_evidence = 'usage.cached_tokens'
+            elif reads:
+                reuse_scope = 'disk_partial_page_4'
+                reuse_evidence = 'log.imprint_read'
+            else:
+                if cached is not None:
+                    reasons.append(
+                        f'page-reuse reported cached_tokens={cached} below partial-page floor {floor} '
+                        '(prefix was recomputed rather than reused)'
+                    )
+                else:
+                    reasons.append(
+                        f'no attributable reuse evidence (cached_tokens or disk read >= {floor}) for page-reuse'
+                    )
+            extra.update(
+                floor_tokens=floor,
+                cached_tokens=cached,
+                reads=[x['line'] for x in reads],
+                reuse_evidence=reuse_evidence,
+                reuse_scope=reuse_scope,
+            )
+        elif case == 'restart-restore':
             if last_prior_receipt is None or measured_count is None:
                 reasons.append('restart-restore requires a prior completed sparse turn with measured tokens')
             else:

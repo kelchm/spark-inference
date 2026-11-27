@@ -676,7 +676,7 @@ class V136FakeEngine:
                  cold_ref_diverge=False, alias_swap_image2=False, stall_s=0.0, stall_on_substring=None,
                  first_token_delay_s=0.0, chunk_delay_s=0.0, chunk_delay_on_substring='MOD_DEC_CONCURRENT_',
                  context_length=workload.CONTEXT, keyed_minimal_health=False, cold_instance=False,
-                 bad_none_reasoning=False):
+                 bad_none_reasoning=False, no_cache_reuse=False, omit_cached_tokens=False):
         self.word_scale = word_scale
         self.strip_reasoning_in_tokenize = strip_reasoning_in_tokenize
         self.collapse_efforts = collapse_efforts
@@ -691,6 +691,8 @@ class V136FakeEngine:
         self.keyed_minimal_health = keyed_minimal_health
         self.cold_instance = cold_instance
         self.bad_none_reasoning = bad_none_reasoning
+        self.no_cache_reuse = no_cache_reuse
+        self.omit_cached_tokens = omit_cached_tokens
         self.health_body = {'status': 'ok'} if keyed_minimal_health else {
             'status': 'ok',
             'model': 'GLM-5.3-Flash',
@@ -817,7 +819,20 @@ class V136FakeEngine:
         chunks.append(event({'content': content[:half]}))
         chunks.append(event({'content': content[half:]}))
         chunks.append(event({}, 'stop'))
-        chunks.append({'choices': [], 'usage': {'prompt_tokens': 20, 'completion_tokens': 12, 'total_tokens': 32}})
+        prompt_tok = max(1, len(self.tokenize(body)))
+        usage = {'prompt_tokens': prompt_tok, 'completion_tokens': 12, 'total_tokens': prompt_tok + 12}
+        if not self.cold_instance and not self.omit_cached_tokens and len(body.get('messages') or []) > 2:
+            if self.no_cache_reuse:
+                cached_tok = 0
+            else:
+                prior_tok = len(self.tokenize({
+                    'messages': body['messages'][:-1],
+                    'reasoning_effort': body.get('reasoning_effort'),
+                    'add_generation_prompt': False,
+                }))
+                cached_tok = min(prompt_tok, prior_tok)
+            usage['prompt_tokens_details'] = {'cached_tokens': cached_tok}
+        chunks.append({'choices': [], 'usage': usage})
         chunks.append(b'[DONE]')
         for i, item in enumerate(chunks):
             if should_stall and i == 3:
@@ -1071,6 +1086,8 @@ class DenseSparseGateTest(unittest.TestCase):
         self.assertEqual(ds['cases']['dense-2051']['measured_prompt_tokens'], 2051)
         self.assertEqual(ds['cases']['sparse-2052']['measured_prompt_tokens'], 2052)
         self.assertGreater(ds['cases']['page-reuse']['measured_prompt_tokens'], 2052)
+        self.assertEqual(ds['cases']['page-reuse']['reuse_scope'], 'in_memory_partial_page_4')
+        self.assertEqual(ds['cases']['page-reuse']['reuse_evidence'], 'usage.cached_tokens')
         self.assertEqual(ds['cases']['restart-restore']['status'], 'pass')
 
         # Cold prefill (covered log with no disk read) fails restart-restore
@@ -1138,6 +1155,51 @@ class DenseSparseGateTest(unittest.TestCase):
         v_tiny = evidence.verdict(tiny, skew_s=0)
         self.assertEqual(v_tiny['gates']['dense_sparse']['cases']['restart-restore']['status'], 'fail')
         self.assertEqual(v_tiny['gates']['dense_sparse']['status'], 'fail')
+
+    def test_dense_sparse_page_reuse_requires_attributable_reuse_evidence(self):
+        # 1. Full recomputation (cached_tokens=0) must FAIL page-reuse and never claim in_memory_partial_page_4
+        recomp = self.tmp / 'recomp_ds'
+        cli('prepare', '--out', recomp, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, no_cache_reuse=True).respond) as srv:
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_recomp = evidence.verdict(recomp, skew_s=0)
+        pr = v_recomp['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr['status'], 'fail', pr)
+        self.assertEqual(pr['reuse_scope'], 'unknown')
+        self.assertEqual(v_recomp['gates']['dense_sparse']['status'], 'fail')
+
+        # 2. Missing reuse evidence (no cached_tokens and no disk read log) must FAIL with reuse_scope='unknown'
+        missing_ev = self.tmp / 'missing_ev_ds'
+        cli('prepare', '--out', missing_ev, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, omit_cached_tokens=True).respond) as srv:
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_miss = evidence.verdict(missing_ev, skew_s=0)
+        pr_miss = v_miss['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_miss['status'], 'fail', pr_miss)
+        self.assertEqual(pr_miss['reuse_scope'], 'unknown')
+
+        # 3. Importing an attributable disk read >= 2048 during page-reuse satisfies page-reuse via log.imprint_read
+        receipts = evidence.Campaign(missing_ev).receipts()
+        pr_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'page-reuse')
+        t0 = evidence.when(pr_rec['started_at']) - timedelta(seconds=5)
+        t_read = evidence.when(pr_rec['started_at']) + (
+            evidence.when(pr_rec['ended_at']) - evidence.when(pr_rec['started_at'])
+        ) / 2
+        pr_log = self.tmp / 'pr_read.log'
+        pr_log.write_text(
+            f'{stamp(t0)} info: server listening\n'
+            f'{stamp(t_read)} info: imprint: read 2052 tokens from disk (12 MiB in 6 ms)\n'
+        )
+        cli('import-log', '--campaign', missing_ev, '--file', pr_log)
+        v_log = evidence.verdict(missing_ev, skew_s=0)
+        pr_log_res = v_log['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_log_res['status'], 'pass', pr_log_res)
+        self.assertEqual(pr_log_res['reuse_scope'], 'disk_partial_page_4')
+        self.assertEqual(pr_log_res['reuse_evidence'], 'log.imprint_read')
 
 
 class DurableImageGateTest(unittest.TestCase):
@@ -1461,7 +1523,8 @@ class CodingReplayAndConcurrencyTest(unittest.TestCase):
         self.assertFalse(ev_teardown['overlapped'])
 
     def test_concurrency_1_2_3_4_pi_buckets_and_starvation_reporting(self):
-        with Loopback(V136FakeEngine(word_scale=1).respond) as srv:
+        fake = V136FakeEngine(word_scale=1, chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_')
+        with Loopback(fake.respond) as srv:
             cli('concurrency', '--campaign', self.root, '--endpoint', srv.url, '--levels', '1,2,3,4', '--chunks', '1')
         v = evidence.verdict(self.root, skew_s=0)
         conc = v['performance']['concurrency']
@@ -1470,11 +1533,17 @@ class CodingReplayAndConcurrencyTest(unittest.TestCase):
         self.assertEqual(set(conc['pi_buckets']), {'C1', 'C2-C3', 'C4'})
         self.assertEqual(conc['pi_buckets']['C2-C3']['levels'], [2, 3])
         self.assertTrue(all(b['all_passed'] for b in conc['pi_buckets'].values()))
+        self.assertEqual(conc['levels']['4']['max_concurrent_streams'], 4)
+        self.assertEqual(conc['levels']['4']['max_concurrent_decode_streams'], 4)
+        self.assertGreater(conc['levels']['4']['shared_elapsed_s'], 0.0)
 
         # Inject starvation on one of the 4 concurrent streams
         starved_root = self.tmp / 'starved-c4'
         cli('prepare', '--out', starved_root, '--release', self.release, '--profile', self.profile)
-        stalled_fake = V136FakeEngine(word_scale=1, stall_s=0.15, stall_on_substring='MOD_CONC_C4_S2_')
+        stalled_fake = V136FakeEngine(
+            word_scale=1, stall_s=0.15, stall_on_substring='MOD_CONC_C4_S2_',
+            chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_',
+        )
         with Loopback(stalled_fake.respond) as srv:
             cli('concurrency', '--campaign', starved_root, '--endpoint', srv.url,
                 '--levels', '1,2,3,4', '--chunks', '1', '--starvation-ms', '60')
@@ -1484,6 +1553,30 @@ class CodingReplayAndConcurrencyTest(unittest.TestCase):
         self.assertEqual(cs['levels']['4']['starved_streams'], 1)
         self.assertFalse(cs['pi_buckets']['C4']['all_passed'])
         self.assertGreater(cs['pi_buckets']['C4']['worst_itl_max_ms'], 60.0)
+
+    def test_concurrency_fails_when_four_streams_are_disjoint_serial(self):
+        fake = V136FakeEngine(word_scale=1, chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_')
+        with Loopback(fake.respond) as srv:
+            cli('concurrency', '--campaign', self.root, '--endpoint', srv.url, '--levels', '4', '--chunks', '1')
+        c = evidence.Campaign(self.root)
+        rec = next(r for r in c.receipts() if r.get('kind') == 'concurrency' and r.get('concurrency') == 4)
+        serial_rec = json.loads(json.dumps(rec))
+        # Rewrite intervals to 4 completely disjoint 1-second serial windows: [10..11], [11..12], [12..13], [13..14]
+        for idx, sinfo in enumerate(serial_rec['streams']):
+            t0 = 10.0 + idx * 1.0
+            sinfo['mono_start_s'] = t0
+            sinfo['first_event_mono_s'] = t0 + 0.0
+            sinfo['last_event_mono_s'] = t0 + 1.0
+            sinfo['mono_end_s'] = t0 + 1.0
+        res = coding._eval_concurrency(c, c.plan, [serial_rec])
+        lvl4 = res['levels']['4']
+        self.assertEqual(lvl4['status'], 'fail', lvl4)
+        self.assertEqual(lvl4['max_concurrent_streams'], 1)
+        self.assertEqual(lvl4['max_concurrent_decode_streams'], 1)
+        # 4 streams * 12 completion tokens = 48 tokens over 4.0s shared span => 12.0 tok/s (not 4 * 12 = 48)
+        self.assertAlmostEqual(lvl4['shared_elapsed_s'], 4.0, places=3)
+        self.assertAlmostEqual(lvl4['aggregate_decode_tok_s'], 12.0, places=3)
+        self.assertTrue(any('concurrent' in r for r in lvl4['reasons']), lvl4['reasons'])
 
 
 if __name__ == '__main__':
