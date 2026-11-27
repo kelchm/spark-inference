@@ -59,7 +59,36 @@ Opt-in arithmetic: `TF_GLM_ABSORB_MMA=1` (tensor-core absorb and expand GEMMs, w
 
 glm53-mia's profile also sets `TENSORFOLD_MEMORY_RESERVE_GIB=12`, `TF_ROCE=1`, `TF_ROCE_MAX_KB=4096` and `TF_GLM_CLEAR_THINKING=0`, which this engine reads too; their values for this lane are to be qualified. Its `TF_KV_PAGES=on` must not be carried over: with `--kv-cache fp8` this engine refuses `on` and `all`, so leave it unset (or `auto` or `off`). Its `TF_GLM_KV_SHARD`, `TF_PROMPT_CACHE_FIRST`, `TF_GLM_HOST_CACHE_GIB`, `TF_GLM_CE_EXCHANGE` and `TF_GLM_W8A8` come from Mia's kit, and this engine ignores them. Request defaults (thinking, reasoning effort, top-k, vision, the chat template) stay with home-lab's profile.
 
-### Open items
+### Container runtime contract
+
+This lane's [Dockerfile](Dockerfile) bakes the shared [runtime/](../../runtime/) package at `/opt/spark-inference/runtime/` with `/usr/local/bin/tensorfold-entrypoint` (default `CMD`) and `/usr/local/bin/tensorfold-health`. See [runtime/README.md](../../runtime/README.md) for the full contract:
+
+- **3-way mounts**: HF model cache (`HF_HOME`), runtime inputs/drafter/template (`TF_RUNTIME_INPUTS_DIR`, `DRAFTER`, `CHAT_TEMPLATE`), and dedicated persistent conversation store (`GLM_LEARN_DIR` / `GLM_LEARN_ROOT`).
+- **Orchestrator-neutral TP & RDMA**: accepts SparkRun (`RANK`, `WORLD_SIZE`, `FABRIC_MASTER`, `MASTER_PORT`, `NCCL_IB_HCA`) and Kubernetes LeaderWorkerSet (`LWS_WORKER_INDEX`, `LWS_GROUP_SIZE`, `LWS_LEADER_ADDRESS`, `TF_ROCE_HCA`) with zero hardcoded host interfaces, so the same image runs unchanged on DGX OS and Talos.
+- **PID-1 supervision & Rank-1 `SIGTERM` flush**: rank 0 forwards `SIGTERM` immediately for HTTP drain + disk flush; rank 1 holds off signaling the follower engine for `RANK1_FLUSH_GRACE_SECONDS` so rank 0 can gather rank 1's pages over the TP link and finish writing `--learn-conversations` states before follower exit.
+- **MemGuard & readiness probes**: unified-memory accounting (`MemAvailable` + parked per-CPU pages, plus cgroup v2 caps) and secret-redacting HTTP + worker state health probes.
+
+## Fast GB10 & prebuilt fatbin builds
+
+By default, CI and `tools/dev_build.sh` compile CUDA kernels only for GB10 (`-Dsm=121`). For fast local rebuilds against `v1.3.6+` when CUDA fatbins have already been compiled, pass prebuilt artifacts to `tools/dev_build.sh`:
+
+```sh
+FATBINS_DIR=/path/to/fatbins TP_FATBIN=/path/to/tp_mailbox.fatbin TOOLS=0 \
+  tools/dev_build.sh <engine-commit> glm53-kelchm
+```
+
+This mounts `prebuilt-fatbins` into the `build` stage and passes `-Dfatbins` / `-Dtp-fatbin` to `zig build`. Set `TP_NVCC=1` when compiling the TP mailbox kernel from source without a prebuilt `tp_mailbox.fatbin`.
+
+## Plugging in the upcoming `v1.3.6` release
+
+`recipe.json` currently stays pinned to the verified `deploy/glm53-kelchm` commit so `tools/check_recipe.py` remains green. Once the upcoming `deploy/glm53-v136-*` durability/performance stack lands on `deploy/glm53-kelchm` in `kelchm/TensorFold`:
+
+1. Update `recipes/glm53-kelchm/recipe.json` (`engine.upstream` to `ashhart/TensorFold@<v1.3.6 sha>`, `engine.commit` to the `deploy/glm53-kelchm` tip, and `carries` to the exact commits above `v1.3.6` oldest first), then verify with `python3 tools/check_recipe.py`.
+2. Open a pull request and merge to `main` so CI builds and publishes `ghcr.io/kelchm/spark-inference/glm53-kelchm:sha-<commit>` with provenance attestation.
+3. Cut the release file with `python3 tools/new_release.py glm53-kelchm`, create and push the printed `release/<release>` tag on the engine commit in `kelchm/TensorFold`, and verify with `python3 tools/check_release.py`.
+4. Run the expanded [qualification/](../../qualification/) suite against the deployed image (recording paired `fresh-boot` and `ordinary-relaunch` host states, the `2,582,528`-token `4×1M` capacity receipt, `2051`/`2052` dense-to-sparse gate, `#1285` durable two-image gate, `CLEAR_THINKING=0` reasoning matrix, loopback coding replay, and `1/2/3/4` multi-stream concurrency).
+
+## Open items
 
 Before a release of this lane is qualified:
 

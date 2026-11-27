@@ -6,10 +6,10 @@ name: Build images
 on:
   # A release only points at an image that already exists, so release files never trigger a build.
   pull_request:
-    paths: ["recipes/**", "!recipes/*/releases/**", ".github/workflows/**"]
+    paths: [".dockerignore", "recipes/**", "!recipes/*/releases/**", "runtime/**", ".github/workflows/**"]
   push:
     branches: [main]
-    paths: ["recipes/**", "!recipes/*/releases/**", ".github/workflows/**"]
+    paths: [".dockerignore", "recipes/**", "!recipes/*/releases/**", "runtime/**", ".github/workflows/**"]
   workflow_dispatch:
 
 permissions: {}

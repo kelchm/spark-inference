@@ -1,10 +1,12 @@
+# syntax=docker/dockerfile:1
 # Adapted from MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104 docker/Dockerfile (Apache-2.0; see NOTICE), by way of
 # recipes/glm53-mia/Dockerfile, which it follows step for step.
 # recipe.json supplies digest-pinned bases, the toolchain and the Spark CPU target; any ARM64 builder works.
 # Changes from the kit: the engine is a kelchm/TensorFold commit (here upstream TensorFold plus the recipe's carries,
-# with no kit), so nothing is patched here; immutable base arguments; Python for SparkRun mods; no video stage
-# (WITH_VIDEO is off in the kit too); no execution of Spark CPU binaries during the build; OCI labels naming the
-# engine and recipe commits.
+# with no kit), so nothing is patched here; immutable base arguments; baked shared runtime/ contract (PID-1 supervisor,
+# Rank-1 SIGTERM flush, MemGuard, readiness probe, 3-way mounts, parameterized RDMA); optional prebuilt -Dfatbins and
+# -Dtp-fatbin build paths alongside single-SM GB10 (-Dsm=121); no video stage (WITH_VIDEO is off in the kit too); no
+# execution of Spark CPU binaries during the build; OCI labels naming the engine and recipe commits.
 # Changes from glm53-mia's: the kit arguments are optional. Without a kit they are all empty and the tf.kit.* labels
 # are empty. Kit notices under packaging/kits are copied whenever the engine has them, and required only with a kit;
 # tools/check_recipe.py requires them of an engine whose carries adapt a kit's patches.
@@ -67,7 +69,15 @@ RUN curl -fsSL --retry 3 -o webp.tar.gz \
  && ldd /codecs/lib/libturbojpeg.so.0 /codecs/lib/libwebpdecoder.so.3
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Engine build: TensorFold at TF_REF, kernels for SM only.
+# Default empty stage for optional prebuilt fatbins; callers override via `--build-context prebuilt-fatbins=<dir>`.
+FROM toolchain AS prebuilt-fatbins-seed
+RUN mkdir -p /empty
+
+FROM scratch AS prebuilt-fatbins
+COPY --from=prebuilt-fatbins-seed /empty /
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Engine build: TensorFold at TF_REF, kernels for SM only (default SM=121 for GB10) or prebuilt -Dfatbins/-Dtp-fatbin.
 FROM toolchain AS build
 ARG XGRAMMAR_REPO=https://github.com/mlc-ai/xgrammar.git
 ARG XGRAMMAR_TAG=v0.2.8
@@ -93,22 +103,44 @@ ARG SM=121
 ARG ZIG_CPU
 ARG ZIG_JOBS=
 ARG STRIP=false
+# Optional prebuilt kernel fatbins (mounted via `--build-context prebuilt-fatbins=<dir>`):
+#   USE_PREBUILT_FATBINS=1    -> pass -Dfatbins=/mnt/fatbins instead of compiling kernels with -Dnvcc -Dsm=<SM>
+#   USE_PREBUILT_TP_FATBIN=1  -> pass -Dtp-fatbin=/mnt/fatbins/tp_mailbox.fatbin
+#   TP_NVCC=1                 -> pass -Dtp-nvcc=/usr/local/cuda/bin/nvcc when not using a prebuilt TP fatbin
+ARG USE_PREBUILT_FATBINS=0
+ARG USE_PREBUILT_TP_FATBIN=0
+ARG TP_NVCC=0
 # TOOLS=1 adds `zig build install`: the CUDA dev CLI (bin/tensorfold: run, digest, kl, ...), tf-cuda-test (GPU kernel
 # suites, including `roce-gather`, which checks this pair's RoCE all-gather against NCCL's), tf-tp-test and
 # tf-tp-watch-check. It costs ~4 more minutes (tf-cuda-test is the longest Zig compile).
 ARG TOOLS=1
 ARG PREFIX=/opt/tensorfold
-# Every build compiles all kernels and executables again: upstream's build runs `nvcc --version` as a side-effect step
-# whose output feeds every fatbin's cache key, so Zig's cache never hits across invocations. Only Zig's global cache
-# (build runner, compiler_rt, libc++) is kept between builds, in a BuildKit cache mount.
+# Every nvcc build compiles all kernels and executables again unless prebuilt fatbins are supplied: upstream's build
+# runs `nvcc --version` as a side-effect step whose output feeds every fatbin's cache key, so Zig's cache never hits
+# across invocations. Only Zig's global cache (build runner, compiler_rt, libc++) is kept in a BuildKit cache mount.
 RUN --mount=type=cache,id=tensorfold-zig-global,target=/root/.cache/zig \
+    --mount=type=bind,from=prebuilt-fatbins,source=/,target=/mnt/fatbins \
     test "$(cat .zig-version)" = "${ZIG_VERSION}" \
       || { echo "TensorFold needs Zig $(cat .zig-version), ZIG_VERSION=${ZIG_VERSION}" >&2; exit 1; } \
  && steps="native grammar" && if [[ "${TOOLS}" == 1 ]]; then steps="install ${steps}"; fi \
+ && cuda_flags=() \
+ && if [[ "${USE_PREBUILT_FATBINS}" == 1 ]]; then \
+      shopt -s nullglob; fatbins=(/mnt/fatbins/*.fatbin); \
+      test ${#fatbins[@]} -gt 0 || { echo "USE_PREBUILT_FATBINS=1 requires *.fatbin files in prebuilt-fatbins context" >&2; exit 1; }; \
+      cuda_flags+=(-Dfatbins=/mnt/fatbins); \
+    else \
+      cuda_flags+=(-Dnvcc=/usr/local/cuda/bin/nvcc -Dsm="${SM}"); \
+    fi \
+ && if [[ "${USE_PREBUILT_TP_FATBIN}" == 1 ]]; then \
+      test -f /mnt/fatbins/tp_mailbox.fatbin || { echo "USE_PREBUILT_TP_FATBIN=1 requires tp_mailbox.fatbin in prebuilt-fatbins context" >&2; exit 1; }; \
+      cuda_flags+=(-Dtp-fatbin=/mnt/fatbins/tp_mailbox.fatbin); \
+    elif [[ "${TP_NVCC}" == 1 ]]; then \
+      cuda_flags+=(-Dtp-nvcc=/usr/local/cuda/bin/nvcc); \
+    fi \
  && start=${SECONDS} \
  && zig build ${steps} --prefix "${PREFIX}" --summary failures \
       ${ZIG_JOBS:+-j${ZIG_JOBS}} -Doptimize=fast -Dcpu="${ZIG_CPU}" -Dstrip="${STRIP}" \
-      -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm="${SM}" -Dxgrammar=/src/xgrammar \
+      "${cuda_flags[@]}" -Dxgrammar=/src/xgrammar \
  && echo "zig build ${steps}: $((SECONDS - start)) s" \
  && rm -f "${PREFIX}"/bin/tf-qwen35-* \
  && test -x "${PREFIX}/native/bin/tensorfold-native"
@@ -128,6 +160,7 @@ RUN shopt -s nullglob \
  && { echo "tf_repo=${TF_REPO}"; echo "tf_commit=$(git rev-parse HEAD)"; \
       echo "tf_version=$(sed -n 's/^[[:space:]]*\.version = "\([^"]*\)".*/\1/p' build.zig.zon)"; \
       echo "zig=${ZIG_VERSION} cpu=${ZIG_CPU} sm=${SM} optimize=fast strip=${STRIP}"; \
+      echo "prebuilt_fatbins=${USE_PREBUILT_FATBINS} prebuilt_tp_fatbin=${USE_PREBUILT_TP_FATBIN} tp_nvcc=${TP_NVCC}"; \
       echo "arch=$(uname -m)"; \
       echo "nvcc=$(nvcc --version | grep -o 'V[0-9][0-9.]*' | head -1)"; echo "xgrammar=${XGRAMMAR_TAG} ${XGRAMMAR_COMMIT}"; \
     } > "${PREFIX}/BUILD-INFO" \
@@ -207,12 +240,21 @@ RUN shopt -s nullglob \
       name="${exe##*/}"; [[ "${name}" == tensorfold ]] && name=tensorfold-cuda; ln -s "${exe}" "/usr/local/bin/${name}"; \
     done \
  && test -x "${PREFIX}/native/bin/tensorfold-native"
+# Shared container runtime contract: PID-1 entrypoint (rank 0/1 + Rank-1 SIGTERM flush), MemGuard, and health probe.
+COPY runtime/ /opt/spark-inference/runtime/
+ENV PYTHONPATH=/opt/spark-inference
+RUN printf '#!/bin/sh\nexec python3 -m runtime.entrypoint "$@"\n' > /usr/local/bin/tensorfold-entrypoint \
+ && printf '#!/bin/sh\nexec python3 -m runtime.health "$@"\n' > /usr/local/bin/tensorfold-health \
+ && chmod 0755 /usr/local/bin/tensorfold-entrypoint /usr/local/bin/tensorfold-health \
+ && /usr/local/bin/tensorfold-entrypoint --help > /dev/null \
+ && /usr/local/bin/tensorfold-health --help > /dev/null
 LABEL org.opencontainers.image.source="https://github.com/kelchm/spark-inference" \
       org.opencontainers.image.revision="${RECIPE_COMMIT}" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="TensorFold native engine for GLM-5.3-Flash on DGX Spark" \
       recipe.lane="${RECIPE_LANE}" \
       recipe.path="recipes/${RECIPE_LANE}/recipe.json" \
+      spark.runtime.contract="v1" \
       tf.repo="${TF_REPO}" \
       tf.ref="${TF_REF}" \
       tf.kit.repo="${KIT_REPO}" \
@@ -222,4 +264,4 @@ LABEL org.opencontainers.image.source="https://github.com/kelchm/spark-inference
       tf.sm="${SM}" \
       tf.zig="${ZIG_VERSION}"
 WORKDIR /workspace
-CMD ["tensorfold-native", "--help"]
+CMD ["/usr/local/bin/tensorfold-entrypoint"]
