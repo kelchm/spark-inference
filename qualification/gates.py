@@ -611,7 +611,8 @@ def _eval_dense_sparse(
         extra: dict[str, Any] = {}
         unknown_evidence = False
         if case == 'page-reuse':
-            floor = DENSE_RESTORE_PAGE_FLOOR
+            # Strictly past the 4 full dense pages (2,048) to prove partial page 4 reuse.
+            floor = DENSE_RESTORE_PAGE_FLOOR + 1
             cached = reply.get('cached_tokens') if reply is not None else None
             c_start, c_end = when_fn(rec['started_at']), when_fn(rec['ended_at'])
             reads = (

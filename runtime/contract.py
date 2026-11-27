@@ -258,26 +258,43 @@ def redact_secrets(text: str, env: Mapping[str, str] | None = None, extra_secret
     """Scrub bearer tokens and secret env values (including comma-separated key members) from diagnostic strings."""
     cleaned = re.sub(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+", r"\1<redacted>", text)
     cleaned = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}", r"\1<redacted>", cleaned)
-    candidates: list[str] = []
+    long_candidates: list[str] = []
+    short_candidates: list[str] = []
+
+    def _add_candidate(candidate: str) -> None:
+        if not candidate or not candidate.strip(_ASCII_WS):
+            return
+        if len(candidate) >= 4:
+            long_candidates.append(candidate)
+        else:
+            short_candidates.append(candidate)
 
     def _add_secret(val: str | None) -> None:
         if not val:
             return
-        if len(val) >= 4:
-            candidates.append(val)
+        _add_candidate(val)
+        trimmed = val.strip(_ASCII_WS)
+        if trimmed and trimmed != val:
+            _add_candidate(trimmed)
         if "," in val:
             for member in parse_api_keys(val):
-                if len(member) >= 4:
-                    candidates.append(member)
+                _add_candidate(member)
 
     for extra in extra_secrets:
         _add_secret(extra)
     if env is not None:
         for key in SECRET_ENV_NAMES:
             _add_secret(env.get(key))
-    for secret in sorted(set(candidates), key=len, reverse=True):
+    for secret in sorted(set(long_candidates), key=len, reverse=True):
         if secret:
             cleaned = cleaned.replace(secret, "<redacted>")
+    for secret in sorted(set(short_candidates), key=len, reverse=True):
+        if secret:
+            cleaned = re.sub(
+                rf"(?<![A-Za-z0-9._~+/=-]){re.escape(secret)}(?![A-Za-z0-9._~+/=-])",
+                "<redacted>",
+                cleaned,
+            )
     return cleaned
 
 

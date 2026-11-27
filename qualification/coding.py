@@ -691,15 +691,19 @@ def _stream_decode_interval(sinfo: Mapping[str, Any], metrics: Mapping[str, Any]
     if isinstance(fs, (int, float)) and isinstance(ls, (int, float)) and not isinstance(fs, bool) and not isinstance(ls, bool):
         if float(ls) >= float(fs):
             return float(fs), float(ls)
-    ttft = metrics.get('ttft_s')
-    dec = metrics.get('decode_s')
-    if isinstance(ttft, (int, float)) and isinstance(dec, (int, float)):
-        base = sinfo.get('mono_start_s')
-        if isinstance(base, (int, float)) and not isinstance(base, bool):
-            return float(base) + float(ttft), float(base) + float(ttft) + max(0.0, float(dec))
-        ts = _parse_iso_epoch_s(sinfo.get('started_at'))
-        if ts is not None:
-            return ts + float(ttft), ts + float(ttft) + max(0.0, float(dec))
+    event_times = sinfo.get('event_times_s') or sinfo.get('token_times_s') or []
+    if not event_times:
+        return None
+    ttft = float(event_times[0])
+    end_off = float(event_times[-1])
+    if end_off < ttft:
+        return None
+    base = sinfo.get('mono_start_s')
+    if isinstance(base, (int, float)) and not isinstance(base, bool):
+        return float(base) + ttft, float(base) + end_off
+    ts = _parse_iso_epoch_s(sinfo.get('started_at'))
+    if ts is not None:
+        return ts + ttft, ts + end_off
     return None
 
 
@@ -822,13 +826,20 @@ def _eval_concurrency(campaign: Any, plan: Mapping[str, Any], recs: list[dict[st
                 level_reasons.append(
                     f'streams did not execute concurrently: max_concurrent_streams={max_concurrent_wall} < {level}'
                 )
-            elif len(decode_intervals) == level and max_concurrent_decode < level:
+            if len(decode_intervals) < level:
+                level_reasons.append(
+                    f'missing decode timing intervals for concurrency verification '
+                    f'({len(decode_intervals)} of {level} streams have decode intervals)'
+                )
+            elif max_concurrent_decode < level:
                 level_reasons.append(
                     f'streams did not overlap during active decode: '
                     f'max_concurrent_decode_streams={max_concurrent_decode} < {level}'
                 )
 
-        shared_elapsed_s = shared_decode_s if shared_decode_s > 0 else shared_wall_s
+        shared_elapsed_s = (
+            shared_decode_s if (len(decode_intervals) == level and shared_decode_s > 0) else shared_wall_s
+        )
         aggregate_decode_tok_s = round(total_completion_tokens / shared_elapsed_s, 3) if shared_elapsed_s > 0 else 0.0
         max_rate = max(tok_rates) if tok_rates else 0.0
         min_rate = min(tok_rates) if tok_rates else 0.0

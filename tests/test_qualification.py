@@ -676,7 +676,8 @@ class V136FakeEngine:
                  cold_ref_diverge=False, alias_swap_image2=False, stall_s=0.0, stall_on_substring=None,
                  first_token_delay_s=0.0, chunk_delay_s=0.0, chunk_delay_on_substring='MOD_DEC_CONCURRENT_',
                  context_length=workload.CONTEXT, keyed_minimal_health=False, cold_instance=False,
-                 bad_none_reasoning=False, no_cache_reuse=False, omit_cached_tokens=False):
+                 bad_none_reasoning=False, no_cache_reuse=False, omit_cached_tokens=False,
+                 cached_tokens_override=None):
         self.word_scale = word_scale
         self.strip_reasoning_in_tokenize = strip_reasoning_in_tokenize
         self.collapse_efforts = collapse_efforts
@@ -693,6 +694,7 @@ class V136FakeEngine:
         self.bad_none_reasoning = bad_none_reasoning
         self.no_cache_reuse = no_cache_reuse
         self.omit_cached_tokens = omit_cached_tokens
+        self.cached_tokens_override = cached_tokens_override
         self.health_body = {'status': 'ok'} if keyed_minimal_health else {
             'status': 'ok',
             'model': 'GLM-5.3-Flash',
@@ -822,7 +824,9 @@ class V136FakeEngine:
         prompt_tok = max(1, len(self.tokenize(body)))
         usage = {'prompt_tokens': prompt_tok, 'completion_tokens': 12, 'total_tokens': prompt_tok + 12}
         if not self.cold_instance and not self.omit_cached_tokens and len(body.get('messages') or []) > 2:
-            if self.no_cache_reuse:
+            if self.cached_tokens_override is not None:
+                cached_tok = min(prompt_tok, int(self.cached_tokens_override))
+            elif self.no_cache_reuse:
                 cached_tok = 0
             else:
                 prior_tok = len(self.tokenize({
@@ -1169,6 +1173,19 @@ class DenseSparseGateTest(unittest.TestCase):
         self.assertEqual(pr['status'], 'fail', pr)
         self.assertEqual(pr['reuse_scope'], 'unknown')
         self.assertEqual(v_recomp['gates']['dense_sparse']['status'], 'fail')
+
+        # 1b. Exact 2048 cached_tokens (4 full pages, 0 tokens of partial page 4) must also FAIL page-reuse
+        boundary_2048 = self.tmp / 'boundary_2048_ds'
+        cli('prepare', '--out', boundary_2048, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, cached_tokens_override=2048).respond) as srv:
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_2048 = evidence.verdict(boundary_2048, skew_s=0)
+        pr_2048 = v_2048['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_2048['status'], 'fail', pr_2048)
+        self.assertEqual(pr_2048['reuse_scope'], 'unknown')
+        self.assertEqual(pr_2048['floor_tokens'], 2049)
 
         # 2. Missing reuse evidence (no cached_tokens and no disk read log) must FAIL with reuse_scope='unknown'
         missing_ev = self.tmp / 'missing_ev_ds'
@@ -1577,6 +1594,28 @@ class CodingReplayAndConcurrencyTest(unittest.TestCase):
         self.assertAlmostEqual(lvl4['shared_elapsed_s'], 4.0, places=3)
         self.assertAlmostEqual(lvl4['aggregate_decode_tok_s'], 12.0, places=3)
         self.assertTrue(any('concurrent' in r for r in lvl4['reasons']), lvl4['reasons'])
+
+        # Missing decode timings on 1 of 4 streams must FAIL level 4 and fall back to shared wall elapsed time
+        missing_dec = json.loads(json.dumps(rec))
+        for idx, sinfo in enumerate(missing_dec['streams']):
+            sinfo['mono_start_s'] = 10.0
+            sinfo['mono_end_s'] = 14.0
+            if idx == 3:
+                sinfo['first_event_mono_s'] = None
+                sinfo['last_event_mono_s'] = None
+                sinfo['event_times_s'] = []
+                sinfo['token_times_s'] = []
+            else:
+                sinfo['first_event_mono_s'] = 10.5
+                sinfo['last_event_mono_s'] = 11.5
+        res_miss = coding._eval_concurrency(c, c.plan, [missing_dec])
+        lvl4_miss = res_miss['levels']['4']
+        self.assertEqual(lvl4_miss['status'], 'fail', lvl4_miss)
+        self.assertEqual(lvl4_miss['max_concurrent_decode_streams'], 3)
+        # Must use shared_wall_s (4.0s), NOT the 3-stream shared_decode_s (1.0s)
+        self.assertAlmostEqual(lvl4_miss['shared_elapsed_s'], 4.0, places=3)
+        self.assertAlmostEqual(lvl4_miss['aggregate_decode_tok_s'], 12.0, places=3)
+        self.assertTrue(any('decode timing' in r for r in lvl4_miss['reasons']), lvl4_miss['reasons'])
 
 
 if __name__ == '__main__':

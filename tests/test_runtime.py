@@ -932,6 +932,32 @@ class HealthProbeTest(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
 
+        # 3. Short (<4 char) comma-separated key (e.g. "abc,another-valid-key") authenticates with "abc" and redacts it
+        srv_short, url_short, auths_short = self._serve({
+            "/health": (200, {
+                "status": "ok",
+                "model": "leaked abc and another-valid-key (but keep abcd intact)",
+                "max_batch_size": 4,
+                "warming": False,
+            }),
+        })
+        try:
+            ok_s, rep_s = health.probe(
+                url=url_short,
+                mode="ready",
+                api_key="abc,another-valid-key",
+                expected_model="GLM-5.3-Flash",
+            )
+            self.assertFalse(ok_s)
+            self.assertEqual(auths_short, ["Bearer abc"])
+            self.assertNotIn(" abc ", rep_s["model"])
+            self.assertNotIn("another-valid-key", rep_s["model"])
+            self.assertIn("abcd", rep_s["model"])
+            self.assertIn("<redacted>", rep_s["model"])
+        finally:
+            srv_short.shutdown()
+            srv_short.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
