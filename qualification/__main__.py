@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 import sys
 
-from . import workload
+from . import coding, gates, host_state, workload
 from .evidence import EVENTS, SCHEMA, Campaign, harness_sha256, tokenize_result, verdict
 from .transport import canonical, exchange, now, parse_sse, sha256, strict_json
 
@@ -72,7 +72,7 @@ def server(args):
         print(f'{path}: HTTP {result["http_status"]} {"ok" if result["complete"] else result["error"]}')
 
 
-def tokenize(c, args, body, purpose, session, step, add_generation_prompt=True):
+def tokenize(c, args, body, purpose, session, step, add_generation_prompt=True, extra=None):
     request = canonical(workload.tokenize_body(body, add_generation_prompt))
     result = exchange(args.endpoint, 'POST', '/v1/tokenize', request, args.tokenize_deadline,
                       max_bytes=LIMITS['tokenize'], api_key=key(args))
@@ -83,11 +83,11 @@ def tokenize(c, args, body, purpose, session, step, add_generation_prompt=True):
             measured = tokenize_result(raw)
         except ValueError as error:
             result.update(complete=False, error=f'ValueError: {error}')
-    sidecars = {'response': raw} if purpose != 'fit' else {}  # fit probes keep hashes only
+    sidecars = {'request': request, 'response': raw} if purpose != 'fit' else {}  # fit probes keep hashes only
     c.write('tokenize', f'{session}-{step}-{purpose}',
             {'endpoint': args.endpoint, 'purpose': purpose, 'session': session, 'step': step,
              'request_sha256': sha256(request), 'chat_request_sha256': sha256(canonical(body)),
-             **result, **(measured or {})}, sidecars)
+             **(extra or {}), **result, **(measured or {})}, sidecars)
     if measured is None:
         raise SystemExit(f'/tokenize failed ({result["error"]}); recorded, not retried')
     return measured['count']
@@ -222,8 +222,350 @@ def import_log(args):
     print(f'log {args.label} recorded as receipt {record["seq"]} ({artifact["sha256"][:12]})')
 
 
+def record_host_state(args):
+    c = Campaign(args.campaign)
+    info, sidecars = host_state.capture_host_state(
+        args.boot_profile,
+        boot_id=args.boot_id,
+        boot_id_path=args.boot_id_path,
+        meminfo_path=args.meminfo,
+        zoneinfo_path=args.zoneinfo,
+        rank=args.rank,
+        host=args.host,
+        run_id=args.run_id,
+        lifecycle_seq=args.lifecycle_seq,
+        note=args.note,
+        captured_at=instant(args.at),
+    )
+    record = c.write('host-state', f'{args.boot_profile}-{args.rank}', info, sidecars)
+    print(f'host-state {args.boot_profile} ({args.rank}) recorded as receipt {record["seq"]} '
+          f'(boot_id={info["boot_id"][:12]}, MemAvailable={info["mem_available_gib"]:.2f} GiB)')
+
+
+def capacity(args):
+    c = Campaign(args.campaign)
+    models_raw = None
+    if args.endpoint:
+        c.require_current_harness()
+        result = exchange(args.endpoint, 'GET', '/health', None, args.deadline,
+                          max_bytes=LIMITS['small'], api_key=key(args))
+        health_raw = result.pop('raw')
+        if not result['complete']:
+            c.write('capacity', 'failed', {'endpoint': args.endpoint, **result}, {'health': health_raw})
+            raise SystemExit(f'/health failed ({result["error"]})')
+        models_res = exchange(args.endpoint, 'GET', '/v1/models', None, args.deadline,
+                              max_bytes=LIMITS['small'], api_key=key(args))
+        models_raw = models_res.pop('raw') if models_res['complete'] else None
+        result['models_http_status'] = models_res.get('http_status')
+        result['models_error'] = models_res.get('error')
+    elif args.health_file:
+        health_raw = Path(args.health_file).read_bytes()
+        result = {'endpoint': None, 'complete': True, 'http_status': 200}
+        if args.models_file:
+            models_raw = Path(args.models_file).read_bytes()
+    else:
+        raise SystemExit('capacity requires --endpoint or --health-file')
+
+    sidecars = {'health': health_raw}
+    models_body = None
+    if models_raw is not None:
+        sidecars['models'] = models_raw
+        models_body = strict_json(models_raw)
+    log_text = None
+    if args.log:
+        log_bytes = Path(args.log).read_bytes()
+        sidecars['log'] = log_bytes
+        log_text = log_bytes.decode('utf-8', 'replace')
+    health_body = strict_json(health_raw)
+    checked = host_state.evaluate_capacity(
+        health_body,
+        log_text,
+        models_body,
+        min_pool_tokens=args.min_pool_tokens,
+        expected_streams=args.streams,
+        expected_context=c.plan['context'],
+        expected_model=c.plan['model'],
+        learn_gib=args.learn_gib,
+        learn_dir=c.manifest['profile']['learn_dir'] if args.check_learn_store else None,
+        check_learn_store=bool(args.check_learn_store),
+        ranks=c.manifest['ranks'],
+    )
+    record = c.write(
+        'capacity',
+        'check',
+        {
+            **result,
+            'min_pool_tokens': args.min_pool_tokens,
+            'expected_streams': args.streams,
+            'expected_context': c.plan['context'],
+            'learn_gib': args.learn_gib,
+            'check_learn_store': bool(args.check_learn_store),
+            'client_observed': checked,
+        },
+        sidecars,
+    )
+    print(f'capacity receipt {record["seq"]}: {checked["status"]} '
+          f'(pool_tokens={checked["pool_tokens"]}, floor={args.min_pool_tokens})')
+    if checked['status'] != 'pass':
+        sys.exit(1)
+
+
+def _gate_history(c, gate_name, cases):
+    turns = []
+    for r in c.receipts():
+        if r.get('kind') != 'gate' or r.get('gate') != gate_name:
+            continue
+        step_id = r.get('case') or r.get('phase') or r.get('step')
+        if step_id not in cases:
+            continue
+        try:
+            msg = c.parsed(r, 'response', parse_sse)['message']
+        except (ValueError, KeyError):
+            continue
+        turns.append((c.parsed(r, 'request', strict_json), msg, r))
+    return turns
+
+
+def dense_sparse(args):
+    c = Campaign(args.campaign)
+    c.require_current_harness()
+    p = c.plan
+    case = args.case
+    history = []
+    pad_units = 0
+    if case in ('dense-2051', 'sparse-2052'):
+        target = gates.DENSE_MAX_VISIBLE if case == 'dense-2051' else gates.SPARSE_MIN_VISIBLE
+
+        def count_fn(units):
+            b, _, _ = gates.dense_sparse_turn(p, case, pad_units=units)
+            return tokenize(c, args, b, 'fit', 'dense-sparse', case)
+
+        pad_units, fitted, _ = gates.fit_exact_tokens(count_fn, target)
+        if fitted != target:
+            raise SystemExit(f'{case}: exact fit reached {fitted} tokens, not {target}')
+    else:
+        prior_cases = ('sparse-2052',) if case == 'page-reuse' else ('sparse-2052', 'page-reuse')
+        done = _gate_history(c, 'dense-sparse', prior_cases)
+        if not done:
+            raise SystemExit(f'dense-sparse/{case} requires a completed sparse-2052 receipt first')
+        history = [h[:2] for h in done]
+        pad_units = args.pad_units
+
+    body, expected, meta = gates.dense_sparse_turn(p, case, pad_units=pad_units, history=history)
+    measured = tokenize(c, args, body, 'measure', 'dense-sparse', case)
+    request = canonical(body)
+    result = exchange(args.endpoint, 'POST', '/v1/chat/completions', request, args.deadline, stream=True,
+                      max_bytes=LIMITS['chat'], api_key=key(args))
+    raw = result.pop('raw')
+    observed = {'correct': None}
+    try:
+        reply = parse_sse(raw)
+        observed = {'finish_reason': reply['finish_reason'], 'usage': reply['usage'],
+                    'correct': workload.correct(expected, reply['message']['content'])}
+    except ValueError as err:
+        observed['parse_error'] = str(err)
+    record = c.write(
+        'gate',
+        f'dense-sparse-{case}',
+        {'endpoint': args.endpoint, 'gate': 'dense-sparse', 'case': case, 'meta': meta,
+         'request_sha256': sha256(request), 'measured_prompt_tokens': measured, **result,
+         'client_observed': observed},
+        {'request': request, 'response': raw},
+    )
+    print(f'dense-sparse/{case}: receipt {record["seq"]}, {measured} prompt tokens, '
+          f'answer {"correct" if observed["correct"] else "NOT correct"}')
+    if not result['complete'] or observed['correct'] is not True:
+        sys.exit(1)
+
+
+def image_durable(args):
+    c = Campaign(args.campaign)
+    c.require_current_harness()
+    p = c.plan
+    phase = args.phase
+    prior_initial = _gate_history(c, 'image-durable', ('initial',))
+    mid_pad = args.mid_pad_units
+    tail_pad = args.tail_pad_units
+    history = []
+
+    if phase == 'initial':
+        if args.target_tokens <= gates.SPARSE_MIN_VISIBLE:
+            raise SystemExit(f'--target-tokens must exceed sparse boundary ({gates.SPARSE_MIN_VISIBLE})')
+
+        def count_fn(units):
+            b, _, _ = gates.durable_image_turn(p, 'initial', mid_pad_units=mid_pad, tail_pad_units=units)
+            return tokenize(c, args, b, 'fit', 'image-durable', 'initial')
+
+        tail_pad, fitted, _ = gates.fit_exact_tokens(count_fn, args.target_tokens)
+        if fitted <= gates.SPARSE_MIN_VISIBLE:
+            raise SystemExit(f'image-durable/initial reached only {fitted} tokens')
+    else:
+        if prior_initial:
+            init_meta = prior_initial[-1][2].get('meta') or {}
+            mid_pad = init_meta.get('mid_pad_units', mid_pad)
+            tail_pad = init_meta.get('tail_pad_units', tail_pad)
+            if phase in ('restart', 'cold-ref'):
+                history = [prior_initial[-1][:2]]
+        elif phase in ('restart', 'cold-ref'):
+            raise SystemExit(f'image-durable/{phase} requires a completed initial receipt first')
+
+    body, expected, meta = gates.durable_image_turn(
+        p, phase, mid_pad_units=mid_pad, tail_pad_units=tail_pad, history=history
+    )
+    measured = tokenize(c, args, body, 'measure', 'image-durable', phase)
+    if phase == 'initial':
+        for pname, pbody in gates.durable_image_prefix_bodies(p, mid_pad_units=mid_pad, variant='original').items():
+            tokenize(c, args, pbody, pname, 'image-durable', phase, add_generation_prompt=False)
+    request = canonical(body)
+    extra_fields = {}
+    sidecars = {'request': request}
+    if phase == 'cold-ref':
+        # Probe /v1/imprint/resume before cold-ref so the offline verdict can verify the instance has no cached state.
+        cold_probe = exchange(
+            args.endpoint, 'POST', '/v1/imprint/resume', request, args.tokenize_deadline,
+            max_bytes=LIMITS['small'], api_key=key(args),
+        )
+        cold_probe_raw = cold_probe.pop('raw')
+        extra_fields['cold_probe_status'] = cold_probe.get('http_status')
+        extra_fields['cold_probe_error'] = cold_probe.get('error')
+        sidecars['cold_probe'] = cold_probe_raw
+    result = exchange(args.endpoint, 'POST', '/v1/chat/completions', request, args.deadline, stream=True,
+                      max_bytes=LIMITS['chat'], api_key=key(args))
+    raw = result.pop('raw')
+    sidecars['response'] = raw
+    observed = {'correct': None}
+    try:
+        reply = parse_sse(raw)
+        observed = {'finish_reason': reply['finish_reason'], 'usage': reply['usage'],
+                    'correct': workload.correct(expected, reply['message']['content'])}
+    except ValueError as err:
+        observed['parse_error'] = str(err)
+    record = c.write(
+        'gate',
+        f'image-durable-{phase}',
+        {'endpoint': args.endpoint, 'gate': 'image-durable', 'phase': phase, 'meta': meta,
+         'request_sha256': sha256(request), 'measured_prompt_tokens': measured, **extra_fields, **result,
+         'client_observed': observed},
+        sidecars,
+    )
+    print(f'image-durable/{phase}: receipt {record["seq"]}, {measured} prompt tokens, '
+          f'answer {"correct" if observed["correct"] else "NOT correct"}')
+    if not result['complete'] or observed['correct'] is not True:
+        sys.exit(1)
+
+
+def reasoning_matrix(args):
+    c = Campaign(args.campaign)
+    c.require_current_harness()
+    p = c.plan
+    efforts = tuple(e.strip() for e in args.efforts.split(',') if e.strip())
+    failed = False
+    for effort in efforts:
+        if effort not in gates.REASONING_EFFORTS:
+            raise SystemExit(f'unknown effort {effort!r}; expected subset of {gates.REASONING_EFFORTS}')
+        # 1. Distinct prompt render check via /v1/tokenize on IDENTICAL messages across all efforts
+        render_body = gates.reasoning_render_body(p, effort)
+        tokenize(c, args, render_body, 'effort-render', 'reasoning-matrix', effort, extra={'effort': effort})
+
+        # 2. Turn 1
+        t1_body, t1_expected, t1_meta = gates.reasoning_matrix_turn(p, effort, 'turn-1')
+        t1_req = canonical(t1_body)
+        t1_res = exchange(args.endpoint, 'POST', '/v1/chat/completions', t1_req, args.deadline, stream=True,
+                          max_bytes=LIMITS['chat'], api_key=key(args))
+        t1_raw = t1_res.pop('raw')
+        t1_reply = None
+        t1_obs = {'correct': None}
+        try:
+            t1_reply = parse_sse(t1_raw)
+            t1_obs = {'finish_reason': t1_reply['finish_reason'], 'usage': t1_reply['usage'],
+                      'has_reasoning': bool(t1_reply['message'].get('reasoning_content')),
+                      'correct': workload.correct(t1_expected, t1_reply['message']['content'])}
+        except ValueError as err:
+            t1_obs['parse_error'] = str(err)
+        c.write(
+            'gate',
+            f'reasoning-{effort}-turn-1',
+            {'endpoint': args.endpoint, 'gate': 'reasoning-matrix', 'effort': effort, 'step': 'turn-1',
+             'meta': t1_meta, 'request_sha256': sha256(t1_req), **t1_res, 'client_observed': t1_obs},
+            {'request': t1_req, 'response': t1_raw},
+        )
+        if not t1_res['complete'] or t1_obs['correct'] is not True or t1_reply is None:
+            failed = True
+            continue
+
+        # 3. Turn 2 replaying reasoning_content verbatim (CLEAR_THINKING=0)
+        t2_body, t2_expected, t2_meta = gates.reasoning_matrix_turn(
+            p, effort, 'turn-2', history=[(t1_body, t1_reply['message'])]
+        )
+        tokenize(c, args, t2_body, 'clear-thinking-with', 'reasoning-matrix', effort, extra={'effort': effort})
+        no_think_msg = dict(t1_reply['message'])
+        no_think_msg['reasoning_content'] = ''
+        t2_without, _, _ = gates.reasoning_matrix_turn(p, effort, 'turn-2', history=[(t1_body, no_think_msg)])
+        tokenize(c, args, t2_without, 'clear-thinking-without', 'reasoning-matrix', effort, extra={'effort': effort})
+
+        t2_req = canonical(t2_body)
+        t2_res = exchange(args.endpoint, 'POST', '/v1/chat/completions', t2_req, args.deadline, stream=True,
+                          max_bytes=LIMITS['chat'], api_key=key(args))
+        t2_raw = t2_res.pop('raw')
+        t2_obs = {'correct': None}
+        try:
+            t2_reply = parse_sse(t2_raw)
+            t2_obs = {'finish_reason': t2_reply['finish_reason'], 'usage': t2_reply['usage'],
+                      'correct': workload.correct(t2_expected, t2_reply['message']['content'])}
+        except ValueError as err:
+            t2_obs['parse_error'] = str(err)
+        c.write(
+            'gate',
+            f'reasoning-{effort}-turn-2',
+            {'endpoint': args.endpoint, 'gate': 'reasoning-matrix', 'effort': effort, 'step': 'turn-2',
+             'meta': t2_meta, 'request_sha256': sha256(t2_req), **t2_res, 'client_observed': t2_obs},
+            {'request': t2_req, 'response': t2_raw},
+        )
+        if not t2_res['complete'] or t2_obs['correct'] is not True:
+            failed = True
+        print(f'reasoning-matrix/{effort}: turn-1={t1_obs["correct"]}, turn-2={t2_obs["correct"]}')
+    if failed:
+        sys.exit(1)
+
+
+def coding_replay(args):
+    c = Campaign(args.campaign)
+    c.require_current_harness()
+    rec = coding.run_coding_replay(
+        c,
+        endpoint=args.endpoint,
+        shape=args.shape,
+        turns=args.turns,
+        target_tokens=args.target_tokens,
+        deadline=args.deadline,
+        tokenize_deadline=args.tokenize_deadline,
+        starvation_ms=args.starvation_ms,
+        api_key=key(args),
+        tokenize_fn=lambda body, purpose, sess, step: tokenize(c, args, body, purpose, sess, step),
+        chat_limit=LIMITS['chat'],
+    )
+    print(f'coding-replay/{args.shape}: receipt {rec["seq"]} recorded')
+
+
+def concurrency_cmd(args):
+    c = Campaign(args.campaign)
+    c.require_current_harness()
+    levels = tuple(int(x.strip()) for x in args.levels.split(',') if x.strip())
+    recs = coding.run_concurrency(
+        c,
+        endpoint=args.endpoint,
+        levels=levels,
+        chunks_per_stream=args.chunks,
+        deadline=args.deadline,
+        starvation_ms=args.starvation_ms,
+        api_key=key(args),
+        chat_limit=LIMITS['chat'],
+    )
+    print(f'concurrency levels {list(levels)} recorded ({len(recs)} receipts)')
+
+
 def run_verdict(args):
-    result = verdict(args.campaign, args.clock_skew, args.tolerance)
+    result = verdict(args.campaign, args.clock_skew, args.tolerance, require_boot_pairing=args.require_boot_pairing)
     text = json.dumps(result, indent=1, sort_keys=True, default=str) + '\n'
     if args.output:
         with open(args.output, 'x') as out:
@@ -282,10 +624,75 @@ def main(argv=None):
     s.add_argument('--label', default='rank0')
     s.add_argument('--captured-at', help='ISO-8601 time the log was captured (default: now)')
     s.set_defaults(func=import_log)
+    s = sub.add_parser('record-host-state',
+                       help='record host boot_id, MemAvailable and fresh-boot/ordinary-relaunch tag (offline)')
+    s.add_argument('--campaign', required=True)
+    s.add_argument('--boot-profile', required=True, choices=host_state.BOOT_PROFILES)
+    s.add_argument('--boot-id', default=None, help='explicit kernel boot_id UUID (reads boot-id-path if omitted)')
+    s.add_argument('--boot-id-path', default='/proc/sys/kernel/random/boot_id')
+    s.add_argument('--meminfo', default='/proc/meminfo')
+    s.add_argument('--zoneinfo', default='/proc/zoneinfo')
+    s.add_argument('--rank', default='rank0')
+    s.add_argument('--host', default='')
+    s.add_argument('--run-id', default='')
+    s.add_argument('--lifecycle-seq', type=int, default=None)
+    s.add_argument('--at', default=None, help='ISO-8601 capture time (default: now)')
+    s.add_argument('--note', default='')
+    s.set_defaults(func=record_host_state)
+
+    s = sub.add_parser('capacity', help='verify 2,582,528-token 4x1M pool floor from /health, /v1/models and optional log')
+    s.add_argument('--campaign', required=True)
+    s.add_argument('--endpoint', default=None, help='explicit base URL (omit when using --health-file offline)')
+    s.add_argument('--health-file', default=None, help='offline /health JSON file')
+    s.add_argument('--models-file', default=None, help='offline /v1/models JSON file')
+    s.add_argument('--log', default=None, help='optional startup log file with KV pool / learn-store lines')
+    s.add_argument('--min-pool-tokens', type=int, default=host_state.POOL_FLOOR_4X1M)
+    s.add_argument('--streams', type=int, default=host_state.DEFAULT_STREAMS)
+    s.add_argument('--learn-gib', type=int, default=None)
+    s.add_argument('--check-learn-store', action='store_true')
+    s.add_argument('--deadline', type=float, default=30.0)
+    s.add_argument('--api-key-env', default=None)
+    s.set_defaults(func=capacity)
+
+    s = online('dense-sparse', 'run 2051/2052 dense-to-sparse, page-reuse, and restart-restore gate', 900)
+    s.add_argument('--case', required=True, choices=gates.DENSE_SPARSE_CASES)
+    s.add_argument('--pad-units', type=int, default=32)
+    s.add_argument('--tokenize-deadline', type=float, default=300)
+    s.set_defaults(func=dense_sparse)
+
+    s = online('image-durable', 'run #1285 durable two-image sparse/restart/cut/swap gate', 1800)
+    s.add_argument('--phase', required=True, choices=gates.DURABLE_IMAGE_PHASES)
+    s.add_argument('--target-tokens', type=int, default=4096)
+    s.add_argument('--mid-pad-units', type=int, default=60)
+    s.add_argument('--tail-pad-units', type=int, default=0)
+    s.add_argument('--tokenize-deadline', type=float, default=300)
+    s.set_defaults(func=image_durable)
+
+    s = online('reasoning-matrix', 'run CLEAR_THINKING=0 + max/high/low/none reasoning effort matrix', 1800)
+    s.add_argument('--efforts', default=','.join(gates.REASONING_EFFORTS))
+    s.add_argument('--tokenize-deadline', type=float, default=300)
+    s.set_defaults(func=reasoning_matrix)
+
+    s = online('coding-replay', 'run 40k / 262k warm coding replay or cold-prefill + concurrent decoder', 3600)
+    s.add_argument('--shape', required=True, choices=sorted(coding.CODING_SHAPES))
+    s.add_argument('--turns', type=int, default=3)
+    s.add_argument('--target-tokens', type=int, default=None)
+    s.add_argument('--starvation-ms', type=float, default=coding.DEFAULT_STARVATION_MS)
+    s.add_argument('--tokenize-deadline', type=float, default=900)
+    s.set_defaults(func=coding_replay)
+
+    s = online('concurrency', 'run 1/2/3/4 concurrent streams with Pi C1/C2-C3/C4 starvation reporting', 3600)
+    s.add_argument('--levels', default='1,2,3,4')
+    s.add_argument('--chunks', type=int, default=2)
+    s.add_argument('--starvation-ms', type=float, default=coding.DEFAULT_STARVATION_MS)
+    s.set_defaults(func=concurrency_cmd)
+
     s = sub.add_parser('verdict', help='judge the campaign from its receipts and logs (offline)')
     s.add_argument('--campaign', required=True)
     s.add_argument('--tolerance', type=int, default=4096, help='tokens a disk read may fall short of the prior prompt')
     s.add_argument('--clock-skew', type=float, default=2.0, help='seconds between client and log clocks')
+    s.add_argument('--require-boot-pairing', action='store_true',
+                   help='require paired fresh-boot and ordinary-relaunch host-state receipts')
     s.add_argument('--output', help='write the full verdict here (created exclusively)')
     s.set_defaults(func=run_verdict)
 

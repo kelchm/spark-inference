@@ -128,18 +128,38 @@ def ledger_user(p, session, step, start, count):
 
 # Images: 2x2 quadrants of named palette colors, so the expected answer is known mechanically.
 
-def png(colors, size=IMAGE_SIZE):
-    half = size // 2
+def png(colors, size=IMAGE_SIZE, height=None):
+    width = size
+    height = size if height is None else height
+    half_w, half_h = width // 2, height // 2
     rows = []
-    for y in range(size):
-        left, right = (colors[0], colors[1]) if y < half else (colors[2], colors[3])
-        rows.append(b'\x00' + bytes(PALETTE[left]) * half + bytes(PALETTE[right]) * (size - half))
+    for y in range(height):
+        left, right = (colors[0], colors[1]) if y < half_h else (colors[2], colors[3])
+        rows.append(b'\x00' + bytes(PALETTE[left]) * half_w + bytes(PALETTE[right]) * (width - half_w))
 
     def part(kind, data):
         return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
 
-    return (b'\x89PNG\r\n\x1a\n' + part(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) +
+    return (b'\x89PNG\r\n\x1a\n' + part(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)) +
             part(b'IDAT', zlib.compress(b''.join(rows), 9)) + part(b'IEND', b''))
+
+
+def png_dimensions(data):
+    """Return (width, height) of an 8-bit RGB non-interlaced PNG, verifying CRCs."""
+    if data[:8] != b'\x89PNG\r\n\x1a\n':
+        raise ValueError('not a PNG')
+    at, header = 8, None
+    while at < len(data):
+        length, kind = struct.unpack('>I4s', data[at:at + 8])
+        body = data[at + 8:at + 8 + length]
+        if struct.unpack('>I', data[at + 8 + length:at + 12 + length])[0] != zlib.crc32(kind + body):
+            raise ValueError('PNG CRC mismatch')
+        if kind == b'IHDR':
+            header = struct.unpack('>IIBBBBB', body)
+        at += 12 + length
+    if header is None or header[2:] != (8, 2, 0, 0, 0):
+        raise ValueError('only 8-bit RGB non-interlaced PNGs are decoded')
+    return header[0], header[1]
 
 
 def quadrant_colors(data):

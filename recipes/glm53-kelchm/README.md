@@ -1,73 +1,84 @@
 # GLM-5.3-Flash on two DGX Sparks, our own recipe
 
-The engine is [`deploy/glm53-kelchm`](https://github.com/kelchm/TensorFold/tree/deploy/glm53-kelchm) in kelchm/TensorFold: upstream TensorFold `fcf85f7a` with no kit, plus the commits listed in [recipe.json](recipe.json)'s `carries`, oldest first. They are:
+The engine is [`deploy/glm53-kelchm`](https://github.com/kelchm/TensorFold/tree/deploy/glm53-kelchm) in kelchm/TensorFold: upstream TensorFold `v1.3.6` (`a681f003`) with no kit, plus the 23 commits listed in [recipe.json](recipe.json)'s `carries`, oldest first. They port paged FP8 KV and cross-page disk save/restore onto `v1.3.6`, persist unsalted image conversation metadata in the rows disk store, allow `TF_GLM_REQUEST_STARTS=1` alongside `--learn-conversations` via format-2 disk headers carrying the `below` cut digest, and add our verified bit-exact P5 GLM CUDA prompt, decode, DFlash2, and TP2 RoCE optimizations.
 
-- Robert Wojciechowski's conversation states on disk for every rank (`--learn-conversations`), from [ashhart/TensorFold#1411](https://github.com/ashhart/TensorFold/pull/1411), and laidick's message-start prompt cuts, from [ashhart/TensorFold#2404](https://github.com/ashhart/TensorFold/pull/2404). Both are open upstream and carried with their authors.
-- Our own GLM CUDA prompt and decode work, not yet upstream. Several commits adapt patches from Mia's kit; each names its source in an `Adapted-from:` trailer and credits Mia as co-author, and the recipe repeats those sources as `adapted_from`.
-
-`tools/check_recipe.py` checks that the commits above `engine.upstream` are exactly that list. [recipe.json](recipe.json) also pins base images and toolchain, which the image build uses, and the weights and drafter revisions, which it does not: they are what a deployment of this image must load, and qualification receipts name them.
+`tools/check_recipe.py` checks that the commits above `engine.upstream` are exactly that list. [recipe.json](recipe.json) also pins base images and toolchain (`zig 0.17.0`, `sm=121`, `libjpeg-turbo 3.1.4.1`, `libwebp 1.6.0`, `xgrammar v0.2.8`), which the image build uses, and the weights and drafter revisions, which it does not: they are what a deployment of this image must load, and qualification receipts name them.
 
 ## How it differs from glm53-mia
 
-[`glm53-mia`](../glm53-mia/) follows Mia's kit: 110 imported patches on TensorFold `f350cd3e`, taken as a whole. This lane starts from newer upstream TensorFold and takes only the changes we choose, each a reviewed commit we can send upstream or drop. Weights, drafter and build pins are the same. The [Dockerfile](Dockerfile) follows glm53-mia's step for step; without a kit its kit arguments are empty and the image's `tf.kit.*` labels are empty.
+[`glm53-mia`](../glm53-mia/) follows Mia's kit: 110 imported patches on TensorFold `f350cd3e`, taken as a whole. This lane starts from upstream TensorFold `v1.3.6` (`a681f003`) and takes only our reviewed, upstreamable commits. Weights, drafter and build pins are the same. The [Dockerfile](Dockerfile) follows glm53-mia's step for step while baking the shared [runtime/](../../runtime/) contract and supporting optional prebuilt fatbins; without a kit its kit arguments are empty and the image's `tf.kit.*` labels are empty.
 
 ## Kit notices
 
-Mia's kit is Apache-2.0 and asks that its notice and credits accompany modified versions. This lane imports no kit, but its adapted commits take patches from it, so its engine carries the kit's `LICENSE`, `NOTICE.md` and `CREDITS.md` under `packaging/kits/glm-5.3-flash-dgx-sparks-1104/`, as glm53-mia's does, and the Dockerfile copies `packaging/kits` into the image's `/opt/tensorfold/LICENSES/kits/` whenever the engine has it. `tools/check_recipe.py` requires those files at `engine.commit` for every project a carry's `adapted_from` names. A recipe whose engine commit predates them must list the project in `notices_pending`, and `tools/new_release.py` and `tools/check_release.py` refuse to release it; the check accepts that list only while it is exactly what is missing, so it goes when the engine commit moves to one that carries the files.
+The engine commit carries the verbatim Apache-2.0 `LICENSE`, `NOTICE.md` and `CREDITS.md` from `MiaAI-Lab/GLM-5.3-Flash-DGX-Sparks-1104` under `packaging/kits/glm-5.3-flash-dgx-sparks-1104/`, and the [Dockerfile](Dockerfile) copies `packaging/kits` into `/opt/tensorfold/LICENSES/kits/` in the image. `tools/check_recipe.py` verifies `packaging/kits` whenever a carry adapts a kit's patches or a lane imports a kit.
 
 ## Serving profile
 
-The profile lives in home-lab's deployment profiles, not here; set it the same on every rank. The engine commit has been checked on the Sparks with the switches below, but the lane has no release yet. After the engine switches come every other setting that decides how the lane serves, beside glm53-mia's native profile in home-lab (`glm53-mia-2026.11.07-agent-1m`) for reference. A value marked *to be qualified* or *to be decided* is not chosen yet; each is listed under [Open items](#open-items).
+The profile lives in home-lab's deployment profiles, not here; set it the same on every rank. This `v1.3.6` P5 engine commit has been qualified on the two GB10 DGX Sparks with the bit-exact serving switches below; the table shows them beside `glm53-mia`'s reference native profile in home-lab (`glm53-mia-2026.11.07-agent-1m`).
 
-### Engine switches
+### Verified bit-exact P5 switches
 
-- `TF_GLM_CHUNK_SOLO=4096 TF_GLM_PROMPT_PAIR=solo`: a prompt step takes two 4,096-row solo chunks in one pass. The engine refuses this at start if it does not fit the memory budget at the chosen `--context` and `--parallel`.
-- `TF_GLM_SHARED_BUDGETS=0`: shared rounds size each stream's drafts from its last grant plus slack (see [ashhart/TensorFold#2720](https://github.com/ashhart/TensorFold/issues/2720)).
-- Exact switches, qualified on the Sparks. Each replaces kernels or copies with ones that give the same bytes.
-  - `TF_GLM_HC_FUSE=1`: a prompt call's `hc_post` also writes the next site's `hc_pre` partials.
-  - `TF_GLM_SHARED_SLOT=1`: a prompt call's shared-expert down projection writes its MoE slot directly.
-  - `TF_GLM_MM_FAST4=1`: 4-bit packed prompt matmuls build their BF16 weight pairs by subtraction, not int-to-float conversions.
-  - `TF_GLM_ROUTER_FUSE=1`: a prompt call's router adds its eight K slices inside one launch, without the slices' scratch or a second launch to sum them.
-  - `TF_GLM_COPIES=1`: priority copies of verified roots and context while drafting. It helped replies that re-emit their input with edits and was neutral elsewhere.
-  - `TF_GLM_DENSE_PRUNE`: on by default, so leave it unset (`0` turns it off). A chunk's dense attention skips the rows sparse attention overwrites.
-  - `TF_GLM_PDL_CHAIN`, `TF_GLM_KDA_STEP_WARPS`, `TF_GLM_HC_SPLIT` and `TF_GLM_HC_PART` stay unset: their defaults are the carried decode kernels.
-- `TF_GLM_DRAFT_CONFIDENCE` stays unset, at its default of 0.7: lower thresholds were slower in every case measured.
-- `TF_GLM_DENSE_BITS=4 TF_GLM_HEAD_BITS=8`: the dense linears packed to 4 bits and the output head to 8 at load, both lossy against the bf16 weights. This is the profile's value, pending the user's decision on the trade-off: 4-bit dense costs 0.028 nats a token of natural-text NLL against 8, while 8-bit dense costs about 18–21% of single-stream decode speed and about 2.4% of cold prompt speed. glm53-mia's profile uses 8 for both.
-- `--kv-cache fp8`.
-- The DFlash2 drafter from `recipe.json` with `--drafter-bits 4`.
-
-Opt-in arithmetic: `TF_GLM_ABSORB_MMA=1` (tensor-core absorb and expand GEMMs, with a different FP32 accumulation order) and `TF_GLM_EXL3_BF16_SLOTS=1` (an EXL3 prompt chunk's MoE slot rows rounded to bf16). Both change rounding, so outputs drift from the defaults. On natural text they moved NLL by −0.0003 and +0.001 nats a token against 4-bit dense, which is small, and they stay opt-in: the profile leaves them unset. glm53-mia's profile sets the kit's `TF_GLM_ABSORB_MMA=1`.
+- Quantization and KV layout: `TF_GLM_DENSE_BITS=4`, `TF_GLM_HEAD_BITS=8`, `TF_KV_PAGES=on`, `--kv-cache fp8`, and the pinned DFlash2 drafter with `--drafter-bits 4`. Paged FP8 KV unlocks four concurrent 1M-context streams on 2× GB10, allocating `5,413` pages (`2,771,456` active KV tokens at 512 rows/page).
+- Bit-exact prompt, decode, DFlash2 and RoCE switches (qualified on GB10):
+  - `TF_GLM_DFLASH_ONLY=1`: routes speculative drafting strictly through DFlash2 with selector vocab bounds checking.
+  - `TF_GLM_DFLASH_Q4_DOWN=1`: uses Q4 MLP down projections (with wide 32/64/128-row Q4 tiles) in DFlash2 and the draft head.
+  - `TF_GLM_COPY_8_16=1`: verified 8/16-token context copy policy during drafting.
+  - `TF_GLM_EXL3_DECODE=1` and `TF_GLM_EXL3_N_MAJOR=1`: EXL3 decode kernels across 1..32 rows with N-major layout on rows 4 and 8..32.
+  - `TF_GLM_PACKED_PROMPT_S2=1`: bit-exact two-stage packed prompt projections with L2 row-block groups.
+  - `TF_GLM_DFLASH_SNAP_CONTEXT=1`: 640-row DFlash2 prompt context snapshot overlay.
+  - `TF_GLM_PAIR_DFLASH=1`: pairs prompt steps beside DFlash2 rounds (clearing `TF_GLM_REQUEST_STARTS` cut boundaries).
+  - `TF_GLM_MULTI_PREFILL=1`: batches short prompts beside stepped long-context fills.
+  - `TF_GLM_ROCE_FUSE=1`: TP2 RoCE post-epilogue fusion (paired with `TF_ROCE=1` and `TF_ROCE_MAX_KB=4096`).
+  - `TF_GLM_REQUEST_STARTS=1`: message-start prompt cuts, now compatible with `--learn-conversations` via format-2 disk headers carrying the `below` cut digest.
+  - `TF_GLM_CLEAR_THINKING=0`: preserves prior turn reasoning across multi-turn replays.
+- Explicitly kept off: `TF_GLM_L2PF_SHARED_FIRST=0` and `TF_GLM_PRICED_WINDOWS=0` stay disabled because live GB10 A/B measurements showed regressions with either enabled.
 
 ### Capacity, scheduling and conversation reuse
 
-| Setting | glm53-mia (`agent-1m`) | This lane |
+| Setting | glm53-mia (`agent-1m`) | This lane (`v1.3.6` P5) |
 | --- | --- | --- |
-| `--parallel`, `--context` | 4 at 1,048,576 | to be qualified: 2 at 1,048,576, or 4 at a shorter context (see the known limit below) |
-| `--max-tokens` | 32,768 | to be qualified |
-| `--prompt-cache-gib` | 6 (the engine's default is 16) | to be qualified |
-| Conversation reuse | `--learn-conversations`, with `--learn-gib 64 --learn-min-free-gib 50 --learn-daily-gib 128` | to be qualified: `--learn-conversations` or `TF_GLM_REQUEST_STARTS=1`, not both |
-| `TENSORFOLD_PREFILL_SHARE` | 0.68 | to be decided by the user (see below) |
-| `TENSORFOLD_PREFILL_BUDGET` | unset (no cap) | to be qualified |
-| `TF_HEAT_HIGH`, `TF_HEAT_LOW` | unset (no heat bands) | to be qualified |
-| `TF_GLM_DRAFT_CONFIDENCE` | unset (0.7) | unset (0.7) |
-| `TF_GLM_COPIES` | unset (off) | 1 |
+| `--parallel`, `--context` | 4 at 1,048,576 | 4 at 1,048,576 (`TF_KV_PAGES=on --kv-cache fp8`, `5,413` pages = `2,771,456` KV tokens on 2× GB10) |
+| `--max-tokens` | 32,768 | 32,768 |
+| `--prompt-cache-gib` | 6 | 8 |
+| Conversation reuse | `--learn-conversations` (`--learn-gib 64 --learn-min-free-gib 50 --learn-daily-gib 128`) | `--learn-conversations` (`--learn-gib 64 --learn-min-free-gib 50 --learn-daily-gib 128`) together with `TF_GLM_REQUEST_STARTS=1` |
+| `TENSORFOLD_PREFILL_SHARE` | 0.68 | 0.68 |
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | 12 | 12 |
+| `TF_ROCE`, `TF_ROCE_MAX_KB` | 1, 4096 | 1, 4096 (with `TF_GLM_ROCE_FUSE=1`) |
+| `TF_GLM_CLEAR_THINKING` | 0 | 0 |
+| `TF_GLM_L2PF_SHARED_FIRST`, `TF_GLM_PRICED_WINDOWS` | n/a | 0, 0 (off; GB10 A/B regressions) |
 
-- **Known limit: four streams at 1M.** At `--parallel 4 --context 1048576` the engine refuses to start: the streams need 21.11 GiB against a 14.66 GiB budget, because this engine keeps fp8 KV only as a window per stream. Until it has paged or sharded fp8 KV, the profile must serve 1M context with `--parallel 2`, or four streams at a shorter context.
-- **Conversation reuse.** `--learn-conversations` keeps each rank's part of a conversation's state on disk ([ashhart/TensorFold#1411](https://github.com/ashhart/TensorFold/pull/1411)); with #1411 the engine refuses `--spill-gib` and `--checkpoint-slots` for GLM, so that disk store is the only one. `TF_GLM_REQUEST_STARTS=1` cuts prompts at message starts, so a chat's next turn resumes at its history ([ashhart/TensorFold#2404](https://github.com/ashhart/TensorFold/pull/2404)). The two are mutually exclusive: the engine refuses `TF_GLM_REQUEST_STARTS=1` at start with `--learn-conversations` (`requestStartsAlone` in `cuda_native.zig`), and also with `TF_KV_SHARE` above 0.
-- **Prefill share and fill budget.** At the default `TENSORFOLD_PREFILL_SHARE` of 1, a long prompt's steps owe decoding streams nothing, so while a cold prompt fills the decoders get only the turns between its steps. A share below 1 gives them time back and finishes the prompt later. Which matters more is a serving-policy choice for the user. Measured on this engine with a cold 112K prompt beside one decoding stream: at the default, the prompt took about 63 s and held the decoder to about 0.9 tokens a second meanwhile; at 0.68, the decoder kept about 6.5 tokens a second and the prompt took about 89 s. `TENSORFOLD_PREFILL_BUDGET` caps the prompt rows filled per pass while a stream waits to decode. See TensorFold's RUNBOOK, "Prompt prefill share, budget and admission policy".
-- **Heat bands.** `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest thermal zone is above the high band, until it is at or under the low one; the reply's tokens do not change. The RUNBOOK's measured example is 92 and 88 on three GB10s at TP=3.
+- **Four streams at 1M context.** With paged FP8 KV (`TF_KV_PAGES=on --kv-cache fp8`), `--parallel 4 --context 1048576` starts cleanly on 2× GB10 and yields `5,413` pages (`2,771,456` active KV tokens), comfortably above the `2,582,528`-token `4×1M` capacity floor.
+- **Conversation reuse and image persistence.** `--learn-conversations` keeps each rank's slice of a conversation's state on disk and now works alongside `TF_GLM_REQUEST_STARTS=1` (storing the `below` cut digest in format-2 disk headers so message-start cuts and cross-restart disk reads compose cleanly). Unsalted image conversations also persist their image metadata in the rows disk store across restarts. `TF_KV_SHARE > 0` remains incompatible with both `--learn-conversations` and `TF_GLM_REQUEST_STARTS=1`.
+- **Prefill share and memory reserve.** `TENSORFOLD_PREFILL_SHARE=0.68` protects concurrent decoding streams while a cold prompt fills, and `TENSORFOLD_MEMORY_RESERVE_GIB=12` leaves headroom for unified memory and disk-save staging. `TF_HEAT_HIGH` and `TF_HEAT_LOW` remain available if thermal throttling bands are needed.
 
-glm53-mia's profile also sets `TENSORFOLD_MEMORY_RESERVE_GIB=12`, `TF_ROCE=1`, `TF_ROCE_MAX_KB=4096` and `TF_GLM_CLEAR_THINKING=0`, which this engine reads too; their values for this lane are to be qualified. Its `TF_KV_PAGES=on` must not be carried over: with `--kv-cache fp8` this engine refuses `on` and `all`, so leave it unset (or `auto` or `off`). Its `TF_GLM_KV_SHARD`, `TF_PROMPT_CACHE_FIRST`, `TF_GLM_HOST_CACHE_GIB`, `TF_GLM_CE_EXCHANGE` and `TF_GLM_W8A8` come from Mia's kit, and this engine ignores them. Request defaults (thinking, reasoning effort, top-k, vision, the chat template) stay with home-lab's profile.
+Request defaults (thinking, reasoning effort, top-k, vision, and the chat template) stay with home-lab's profile. Mia-kit-only env vars (`TF_GLM_KV_SHARD`, `TF_PROMPT_CACHE_FIRST`, `TF_GLM_HOST_CACHE_GIB`, `TF_GLM_CE_EXCHANGE`, `TF_GLM_W8A8`) are ignored by this engine.
 
-### Open items
+### Container runtime contract
 
-Before a release of this lane is qualified:
+This lane's [Dockerfile](Dockerfile) bakes the shared [runtime/](../../runtime/) package at `/opt/spark-inference/runtime/` with `/usr/local/bin/tensorfold-entrypoint` (default `CMD`) and `/usr/local/bin/tensorfold-health`. See [runtime/README.md](../../runtime/README.md) for the full contract:
 
-1. Capacity: `--parallel 2` at 1M context or `--parallel 4` at a shorter one, then `--max-tokens` and `--prompt-cache-gib`, with the paired 4,096-row solo chunks fitting the memory budget. Four streams at 1M wait on paged or sharded fp8 KV in the engine.
-2. The user's decision on dense bits: keep 4, trading natural-text NLL for decode speed, or take 8.
-3. The user's decision on `TENSORFOLD_PREFILL_SHARE`: a cold prompt's speed against concurrent decoders' speed. Then `TENSORFOLD_PREFILL_BUDGET`.
-4. Conversation reuse: `--learn-conversations` with its sizes, or `TF_GLM_REQUEST_STARTS=1`.
-5. Heat bands.
-6. `TENSORFOLD_MEMORY_RESERVE_GIB`, `TF_KV_PAGES` and the RoCE settings.
+- **3-way mounts**: HF model cache (`HF_HOME`), runtime inputs/drafter/template (`TF_RUNTIME_INPUTS_DIR`, `DRAFTER`, `CHAT_TEMPLATE`), and dedicated persistent conversation store (`GLM_LEARN_DIR` / `GLM_LEARN_ROOT`).
+- **Orchestrator-neutral TP & RDMA**: accepts SparkRun (`RANK`, `WORLD_SIZE`, `FABRIC_MASTER`, `MASTER_PORT`, `NCCL_IB_HCA`) and Kubernetes LeaderWorkerSet (`LWS_WORKER_INDEX`, `LWS_GROUP_SIZE`, `LWS_LEADER_ADDRESS`, `TF_ROCE_HCA`) with zero hardcoded host interfaces, so the same image runs unchanged on DGX OS and Talos.
+- **PID-1 supervision & Rank-1 `SIGTERM` flush**: rank 0 forwards `SIGTERM` immediately for HTTP drain + disk flush; rank 1 holds off signaling the follower engine for `RANK1_FLUSH_GRACE_SECONDS` (default `60` s, with `>=75` s outer stop grace) so rank 0 can gather rank 1's pages over the TP link and finish writing `--learn-conversations` states before follower exit.
+- **MemGuard & readiness probes**: unified-memory accounting (`MemAvailable` + parked per-CPU pages, plus finite ancestor cgroup v2 caps) and redirect-refusing, secret-redacting HTTP + worker state health probes.
+
+## Fast GB10 & prebuilt fatbin builds
+
+By default, CI and `tools/dev_build.sh` compile CUDA kernels only for GB10 (`-Dsm=121`). For fast local rebuilds against `v1.3.6+` when CUDA fatbins have already been compiled, pass prebuilt artifacts to `tools/dev_build.sh`:
+
+```sh
+FATBINS_DIR=/path/to/fatbins TP_FATBIN=/path/to/tp_mailbox.fatbin TOOLS=0 \
+  tools/dev_build.sh <engine-commit> glm53-kelchm
+```
+
+This mounts `prebuilt-fatbins` into the `build` stage and passes `-Dfatbins` / `-Dtp-fatbin` to `zig build`. Set `TP_NVCC=1` when compiling the TP mailbox kernel from source without a prebuilt `tp_mailbox.fatbin`.
+
+## Cutting a release
+
+Once this `v1.3.6` P5 recipe merges to `main` and CI publishes `ghcr.io/kelchm/spark-inference/glm53-kelchm:sha-<commit>` with its build provenance attestation:
+
+1. Run `python3 tools/new_release.py glm53-kelchm` to write `recipes/glm53-kelchm/releases/glm53-kelchm-<date>.json` and refresh the README status table.
+2. Create and push the printed `release/<release>` tag on `54cd73d425c5cec0117059ac1777a13db39f5c63` in `kelchm/TensorFold`, then verify with `python3 tools/check_release.py`.
+3. Record home-lab's qualification receipt on the release file per [AGENTS.md](../../AGENTS.md) after deploying and running the expanded [qualification/](../../qualification/) suite against the published image digest.
 
 Qualification receipts live with each release, in its `qualification.receipt`. This lane has no release yet.

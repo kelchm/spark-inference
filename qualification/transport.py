@@ -49,7 +49,7 @@ def strict_json(payload):
 class Stream:
     """An OpenAI chat completion SSE stream, parsed strictly as it arrives."""
 
-    def __init__(self):
+    def __init__(self, on_content_event=None):
         self.buffer = b''
         self.data = []
         self.done = False
@@ -57,6 +57,7 @@ class Stream:
         self.usage = None
         self.message = {'role': 'assistant', 'content': '', 'reasoning_content': ''}
         self.calls = {}
+        self.on_content_event = on_content_event
 
     def feed(self, chunk):
         self.buffer += chunk
@@ -104,12 +105,17 @@ class Stream:
             reasoning = delta.get('reasoning_content')
             if reasoning is not None and delta.get('reasoning') is not None and delta['reasoning'] != reasoning:
                 raise ValueError('conflicting reasoning aliases')
+            emitted = False
             for name, value in (('content', delta.get('content')),
                                 ('reasoning_content', reasoning if reasoning is not None else delta.get('reasoning'))):
                 if value is not None:
                     if not isinstance(value, str):
                         raise ValueError('non-text delta')
+                    if value:
+                        emitted = True
                     self.message[name] += value
+            if emitted and self.on_content_event is not None:
+                self.on_content_event()
             for part in delta.get('tool_calls') or []:
                 index = part.get('index') if isinstance(part, dict) else None
                 if type(index) is not int or not 0 <= index < 16:
@@ -142,6 +148,8 @@ class Stream:
             raise ValueError('inconsistent total_tokens')
         details = usage.get('prompt_tokens_details')
         cached = details.get('cached_tokens') if isinstance(details, dict) else None
+        if cached is None and 'cached_tokens' in usage:
+            cached = usage.get('cached_tokens')
         if cached is not None and (type(cached) is not int or not 0 <= cached <= usage['prompt_tokens']):
             raise ValueError('invalid cached_tokens')
         message = dict(self.message)
@@ -155,6 +163,58 @@ class Stream:
         if (self.finish == 'tool_calls') != bool(self.calls):
             raise ValueError('finish_reason and tool calls disagree')
         return {'message': message, 'finish_reason': self.finish, 'usage': usage, 'cached_tokens': cached}
+
+
+def percentile(values, pct):
+    """Nearest-rank percentile over a non-empty numeric sequence."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, int((pct / 100.0) * len(ordered) + 0.999999) - 1))
+    return round(float(ordered[index]), 3)
+
+
+def itl_summary(event_times_s, *, starvation_ms=2000.0, max_gap_override_ms=None):
+    """Compute SSE event-arrival inter-event latency tail stats and starvation counts.
+
+    Client-side timings reflect SSE event arrival instants (not internal GPU step timestamps); pair with engine
+    telemetry for per-token device latency.
+    """
+    times = list(event_times_s or ())
+    if not times:
+        return {
+            'timing_basis': 'sse_event_arrival',
+            'token_events': 0,
+            'ttft_s': None,
+            'decode_s': 0.0,
+            'itl_ms': {'count': 0, 'p50': None, 'p95': None, 'p99': None, 'max': None},
+            'starvation_threshold_ms': float(starvation_ms),
+            'starvation_events': 0,
+            'max_stall_ms': 0.0,
+        }
+    gaps_ms = [round(max(0.0, (b - a) * 1000.0), 3) for a, b in zip(times, times[1:])]
+    max_gap = round(max(gaps_ms), 3) if gaps_ms else 0.0
+    if max_gap_override_ms is not None:
+        max_gap = max(max_gap, round(float(max_gap_override_ms), 3))
+    starved = sum(1 for gap in gaps_ms if gap > starvation_ms)
+    if max_gap_override_ms is not None and max_gap_override_ms > starvation_ms and starved == 0:
+        starved = 1
+    return {
+        'timing_basis': 'sse_event_arrival',
+        'token_events': len(times),
+        'ttft_s': round(times[0], 6),
+        'decode_s': round(max(0.0, times[-1] - times[0]), 6),
+        'itl_ms': {
+            'count': len(gaps_ms),
+            'p50': percentile(gaps_ms, 50),
+            'p95': percentile(gaps_ms, 95),
+            'p99': percentile(gaps_ms, 99),
+            'max': max_gap,
+        },
+        'starvation_threshold_ms': float(starvation_ms),
+        'starvation_events': starved,
+        'max_stall_ms': max_gap,
+    }
 
 
 def parse_sse(raw):
@@ -176,7 +236,8 @@ def base_url(url):
     return parsed, path
 
 
-def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 << 20, api_key=None):
+def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 << 20, api_key=None,
+             on_first_token=None):
     """One request under one total deadline. Never raises for transport or protocol failures; never retries.
 
     Returns the bytes received (bounded by max_bytes), status, content type, Date header, timings and an error string.
@@ -188,13 +249,36 @@ def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 <
         raise ValueError(f'request body of {len(body)} bytes exceeds the engine limit of {BODY_LIMIT}')
     started_at, started = now(), time.monotonic()
     state = {'raw': bytearray(), 'error': None, 'status': None, 'content_type': None, 'date': None,
-             'socket': None, 'complete': False, 'timings': {}}
+             'socket': None, 'complete': False, 'timings': {}, 'event_times': [], 'last_event': None,
+             'max_gap_ms': 0.0, 'first_event_mono': None, 'first_cb_fired': False}
     lock = threading.Lock()
     cancelled = threading.Event()
 
     def mark(name):
         with lock:
             state['timings'].setdefault(name, round(time.monotonic() - started, 6))
+
+    def on_content_event():
+        now_m = time.monotonic()
+        elapsed = round(now_m - started, 6)
+        fire_cb = False
+        with lock:
+            state['timings'].setdefault('first_token_s', elapsed)
+            if state['first_event_mono'] is None:
+                state['first_event_mono'] = now_m
+            if state['last_event'] is not None:
+                gap_ms = max(0.0, (now_m - state['last_event']) * 1000.0)
+                if gap_ms > state['max_gap_ms']:
+                    state['max_gap_ms'] = round(gap_ms, 3)
+            state['last_event'] = now_m
+            # Well above REPLY_RESERVATION (32,768) so normal qualification streams never drop late stalls.
+            if len(state['event_times']) < 65536:
+                state['event_times'].append(elapsed)
+            if on_first_token is not None and not state['first_cb_fired']:
+                state['first_cb_fired'] = True
+                fire_cb = True
+        if fire_cb:
+            on_first_token()
 
     def worker():
         cls = http.client.HTTPSConnection if parsed.scheme == 'https' else http.client.HTTPConnection
@@ -218,7 +302,9 @@ def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 <
             with lock:
                 state['status'], state['content_type'] = response.status, kind
                 state['date'] = response.getheader('Date')
-            parser = Stream() if stream and response.status == 200 and kind == 'text/event-stream' else None
+            parser = Stream(on_content_event=on_content_event) if (
+                stream and response.status == 200 and kind == 'text/event-stream'
+            ) else None
             while not cancelled.is_set():
                 chunk = response.read1(65536)
                 if not chunk:
@@ -230,8 +316,6 @@ def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 <
                     state['raw'].extend(chunk)
                 if parser:
                     parser.feed(chunk)
-                    if parser.message['content'] or parser.message['reasoning_content']:
-                        mark('first_token_s')
                     if parser.done:
                         break
             mark('end_s')
@@ -270,10 +354,18 @@ def exchange(url, method, path, body, deadline_s, *, stream=False, max_bytes=1 <
             except OSError:
                 pass
         thread.join(0.2)
+    ended_mono = time.monotonic()
     with lock:
         raw = bytes(state['raw'])
-        return {'started_at': started_at, 'ended_at': now(), 'elapsed_s': round(time.monotonic() - started, 6),
+        event_times = list(state['event_times'])
+        return {'started_at': started_at, 'ended_at': now(), 'elapsed_s': round(ended_mono - started, 6),
+                'mono_start_s': round(started, 6), 'mono_end_s': round(ended_mono, 6),
+                'first_event_mono_s': round(state['first_event_mono'], 6) if state['first_event_mono'] is not None else None,
+                'last_event_mono_s': round(state['last_event'], 6) if state['last_event'] is not None else None,
                 'deadline_s': deadline_s, 'deadline_exceeded': timed_out, 'http_status': state['status'],
                 'content_type': state['content_type'], 'server_date': state['date'], 'timings': dict(state['timings']),
+                'event_times_s': event_times, 'token_times_s': event_times,
+                'max_gap_ms_observed': state['max_gap_ms'],
+                'stream_profile': itl_summary(event_times, max_gap_override_ms=state['max_gap_ms']),
                 'raw': raw, 'response_sha256': sha256(raw), 'complete': state['complete'] and not timed_out,
                 'error': 'DeadlineExceeded: total request deadline' if timed_out else state['error']}

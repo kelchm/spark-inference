@@ -1,0 +1,6 @@
+*
+!runtime/
+!runtime/**
+!recipes/*/Dockerfile
+**/__pycache__/
+**/*.py[cod]

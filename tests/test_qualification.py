@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from qualification import evidence, transport, workload  # noqa: E402
+from qualification import coding, evidence, gates, host_state, transport, workload  # noqa: E402
 from qualification.__main__ import main  # noqa: E402
 
 DIGEST = 'sha256:' + 'ab' * 32
@@ -667,6 +667,955 @@ class FailureCampaignTest(unittest.TestCase):
         kinds = [p.name for p in (self.root / 'receipts').glob('*.json')]
         self.assertEqual(len(kinds), 1)
         self.assertIn('tokenize', kinds[0])
+
+
+class V136FakeEngine:
+    """Loopback fake engine supporting exact token-granular fitting, images, reasoning_effort, and coding lookups."""
+
+    def __init__(self, *, word_scale=1, strip_reasoning_in_tokenize=False, collapse_efforts=False,
+                 cold_ref_diverge=False, alias_swap_image2=False, stall_s=0.0, stall_on_substring=None,
+                 first_token_delay_s=0.0, chunk_delay_s=0.0, chunk_delay_on_substring='MOD_DEC_CONCURRENT_',
+                 context_length=workload.CONTEXT, keyed_minimal_health=False, cold_instance=False,
+                 bad_none_reasoning=False, no_cache_reuse=False, omit_cached_tokens=False,
+                 cached_tokens_override=None):
+        self.word_scale = word_scale
+        self.strip_reasoning_in_tokenize = strip_reasoning_in_tokenize
+        self.collapse_efforts = collapse_efforts
+        self.cold_ref_diverge = cold_ref_diverge
+        self.alias_swap_image2 = alias_swap_image2
+        self.stall_s = stall_s
+        self.stall_on_substring = stall_on_substring
+        self.first_token_delay_s = first_token_delay_s
+        self.chunk_delay_s = chunk_delay_s
+        self.chunk_delay_on_substring = chunk_delay_on_substring
+        self.context_length = context_length
+        self.keyed_minimal_health = keyed_minimal_health
+        self.cold_instance = cold_instance
+        self.bad_none_reasoning = bad_none_reasoning
+        self.no_cache_reuse = no_cache_reuse
+        self.omit_cached_tokens = omit_cached_tokens
+        self.cached_tokens_override = cached_tokens_override
+        self.health_body = {'status': 'ok'} if keyed_minimal_health else {
+            'status': 'ok',
+            'model': 'GLM-5.3-Flash',
+            'max_batch_size': 4,
+            'warming': False,
+        }
+        self._first_image2_colors = None
+        self._continuation_calls = 0
+        self._warm_chats = 0
+
+    def tokenize(self, body):
+        tokens = []
+        effort = body.get('reasoning_effort') or 'default'
+        effort_id = 900 if self.collapse_efforts and effort in ('max', 'high') else (
+            {'max': 901, 'high': 902, 'low': 903, 'none': 904}.get(effort, 900)
+        )
+        tokens.append(effort_id)
+        for m in body['messages']:
+            parts = m['content'] if isinstance(m['content'], list) else [{'type': 'text', 'text': m['content']}]
+            for part in parts:
+                if part.get('type') == 'text':
+                    words = part.get('text', '').split()
+                    tokens.extend([17] * (len(words) * self.word_scale))
+                elif part.get('type') == 'image_url':
+                    raw = base64.b64decode(part['image_url']['url'].split(',', 1)[1])
+                    w, h = workload.png_dimensions(raw)
+                    # Vision token count reflects image geometry
+                    img_tokens = (w // 16) * (h // 16)
+                    tokens.extend([700 + (w % 100)] * img_tokens)
+            if not self.strip_reasoning_in_tokenize and m.get('reasoning_content'):
+                rwords = m['reasoning_content'].split()
+                tokens.extend([500] * max(1, len(rwords)))
+        if body.get('add_generation_prompt', True):
+            tokens.append(999)
+        return tokens
+
+    def _answer(self, body):
+        messages = body['messages']
+        last = messages[-1]
+        text = last['content'] if isinstance(last['content'], str) else last['content'][-1]['text']
+        all_texts = []
+        for m in messages:
+            if isinstance(m.get('content'), str):
+                all_texts.append(m['content'])
+            elif isinstance(m.get('content'), list):
+                for part in m['content']:
+                    if part.get('type') == 'text':
+                        all_texts.append(part.get('text', ''))
+        everything = '\n'.join(all_texts)
+        urls = [p['image_url']['url'] for m in messages if isinstance(m['content'], list)
+                for p in m['content'] if p['type'] == 'image_url']
+        decoded = [workload.quadrant_colors(base64.b64decode(u.split(',', 1)[1])) for u in urls]
+        if len(decoded) >= 2 and self._first_image2_colors is None:
+            self._first_image2_colors = list(decoded[1])
+
+        lines = []
+        for n, question in re.findall(r'Q(\d+): (.+)', text):
+            if (vault := re.search(r'vault (\S+)\?', question)):
+                lines.append(f'Q{n}=' + re.search(rf'vault {re.escape(vault[1])} is (\S+?)\.', everything)[1])
+            elif (sym := re.search(r'assigned to (\S+)\?', question)):
+                lines.append(f'Q{n}=' + re.search(rf'{re.escape(sym[1])} = "([^"]+)"', everything)[1])
+            elif (image := re.search(r'image (\d), what color is the (\S+) quadrant', question)):
+                idx = int(image[1]) - 1
+                colors = decoded[idx]
+                if idx == 1 and self.alias_swap_image2 and self._first_image2_colors is not None:
+                    colors = self._first_image2_colors
+                lines.append(f'Q{n}=' + colors[workload.QUADRANTS.index(image[2])])
+        if 'Continuation questions:' in text:
+            self._continuation_calls += 1
+            if self.cold_ref_diverge and (self.cold_instance or self._continuation_calls >= 2):
+                lines.append('extra-cold-divergence')
+        return '\n'.join(lines)
+
+    def respond(self, h):
+        if h.path == '/health':
+            return send(h, 200, 'application/json', json.dumps(self.health_body).encode())
+        if h.path == '/v1/models':
+            payload = {'data': [{'id': 'GLM-5.3-Flash', 'context_length': self.context_length,
+                                 'max_model_len': self.context_length}]}
+            return send(h, 200, 'application/json', json.dumps(payload).encode())
+        body = h.body
+        if h.path == '/v1/tokenize':
+            toks = self.tokenize(body)
+            data = json.dumps({'count': len(toks), 'max_model_len': self.context_length, 'tokens': toks}).encode()
+            return send(h, 200, 'application/json', data)
+        if h.path == '/v1/imprint/resume':
+            if self.cold_instance:
+                return send(h, 404, 'application/json', b'{"error": {"message": "learn disabled"}}')
+            if self._warm_chats > 0:
+                return send(h, 200, 'application/json',
+                            b'{"resume_from":"ram","ram_tokens":4096,"disk_tokens":4096,"disk_bytes":65536}')
+            return send(h, 200, 'application/json',
+                        b'{"resume_from":"none","ram_tokens":0,"disk_tokens":0,"disk_bytes":0}')
+        if h.path != '/v1/chat/completions':
+            return send(h, 404, 'application/json', b'{"error": {"message": "not found"}}')
+
+        self._warm_chats += 1
+        content = self._answer(body)
+        effort = body.get('reasoning_effort')
+        reasoning = (
+            'Unexpected leaked reasoning on none.' if effort == 'none' and self.bad_none_reasoning
+            else '' if effort == 'none'
+            else f'Thinking with effort {effort} across {len(body["messages"])} msgs.'
+        )
+        full_text = json.dumps(body)
+        should_stall = self.stall_s > 0 and (self.stall_on_substring is None or self.stall_on_substring in full_text)
+        should_first_delay = self.first_token_delay_s > 0 and (
+            self.stall_on_substring is None or self.stall_on_substring in full_text
+        )
+        should_chunk_delay = self.chunk_delay_s > 0 and (
+            self.chunk_delay_on_substring is None or self.chunk_delay_on_substring in full_text
+        )
+
+        if should_first_delay:
+            time.sleep(self.first_token_delay_s)
+
+        h.send_response(200)
+        h.send_header('Content-Type', 'text/event-stream')
+        h.end_headers()
+        chunks = [event({'role': 'assistant'})]
+        if reasoning:
+            chunks.append(event({'reasoning_content': reasoning}))
+        half = max(1, len(content) // 2)
+        chunks.append(event({'content': content[:half]}))
+        chunks.append(event({'content': content[half:]}))
+        chunks.append(event({}, 'stop'))
+        prompt_tok = max(1, len(self.tokenize(body)))
+        usage = {'prompt_tokens': prompt_tok, 'completion_tokens': 12, 'total_tokens': prompt_tok + 12}
+        if not self.cold_instance and not self.omit_cached_tokens and len(body.get('messages') or []) > 2:
+            if self.cached_tokens_override is not None:
+                cached_tok = min(prompt_tok, int(self.cached_tokens_override))
+            elif self.no_cache_reuse:
+                cached_tok = 0
+            else:
+                prior_tok = len(self.tokenize({
+                    'messages': body['messages'][:-1],
+                    'reasoning_effort': body.get('reasoning_effort'),
+                    'add_generation_prompt': False,
+                }))
+                cached_tok = min(prompt_tok, prior_tok)
+            usage['prompt_tokens_details'] = {'cached_tokens': cached_tok}
+        chunks.append({'choices': [], 'usage': usage})
+        chunks.append(b'[DONE]')
+        for i, item in enumerate(chunks):
+            if should_stall and i == 3:
+                time.sleep(self.stall_s)
+            elif should_chunk_delay and i >= 2:
+                time.sleep(self.chunk_delay_s)
+            h.wfile.write(sse(item))
+            h.wfile.flush()
+
+
+class HostStateAndCapacityTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release, self.profile, self.identity, _ = fixtures(self.tmp)
+        self.root = self.tmp / 'campaign'
+        cli('prepare', '--out', self.root, '--release', self.release, '--profile', self.profile)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_host_state_records_boot_id_memavailable_and_pairs_fresh_vs_relaunch(self):
+        meminfo = self.tmp / 'meminfo'
+        meminfo.write_text(
+            f'MemTotal: {128 * 1024 * 1024} kB\n'
+            f'MemAvailable: {112 * 1024 * 1024} kB\n'
+            'SwapTotal: 0 kB\nSwapFree: 0 kB\n'
+        )
+        zoneinfo = self.tmp / 'zoneinfo'
+        zoneinfo.write_text('Node 0, zone Normal\n  pagesets\n    cpu: 0\n      count: 0\n      high_min: 0\n')
+        with mock.patch.object(socket.socket, 'connect', side_effect=AssertionError('network used')):
+            cli('record-host-state', '--campaign', self.root, '--boot-profile', 'fresh-boot',
+                '--boot-id', '11111111-2222-3333-4444-555555555555',
+                '--meminfo', meminfo, '--zoneinfo', zoneinfo, '--rank', 'rank0', '--host', 'spark-1')
+            partial = evidence.verdict(self.root, require_boot_pairing=True)
+            self.assertFalse(partial['host_state']['paired'])
+            self.assertEqual(partial['host_state']['missing_profiles'], ['ordinary-relaunch'])
+            self.assertTrue(any('260 -> 236 GB/s' in n for n in partial['notes']))
+
+            cli('record-host-state', '--campaign', self.root, '--boot-profile', 'ordinary-relaunch',
+                '--boot-id', '11111111-2222-3333-4444-555555555555',
+                '--meminfo', meminfo, '--zoneinfo', zoneinfo, '--rank', 'rank0', '--host', 'spark-1')
+            # Rank 0 alone on a 2-rank campaign is not yet paired
+            rank0_only = evidence.verdict(self.root, require_boot_pairing=True)
+            self.assertFalse(rank0_only['host_state']['paired'])
+            self.assertEqual(rank0_only['host_state']['missing_ranks'], ['rank1'])
+
+            cli('record-host-state', '--campaign', self.root, '--boot-profile', 'fresh-boot',
+                '--boot-id', '22222222-2222-3333-4444-555555555555',
+                '--meminfo', meminfo, '--zoneinfo', zoneinfo, '--rank', 'rank1', '--host', 'spark-2')
+            cli('record-host-state', '--campaign', self.root, '--boot-profile', 'ordinary-relaunch',
+                '--boot-id', '22222222-2222-3333-4444-555555555555',
+                '--meminfo', meminfo, '--zoneinfo', zoneinfo, '--rank', 'rank1', '--host', 'spark-2')
+            paired = evidence.verdict(self.root, require_boot_pairing=True)
+            self.assertTrue(paired['host_state']['paired'])
+            self.assertEqual(paired['host_state']['status'], 'pass')
+            self.assertEqual(paired['host_state']['missing_ranks'], [])
+            rec0 = paired['host_state']['records']['fresh-boot'][0]
+            self.assertEqual(rec0['boot_id'], '11111111-2222-3333-4444-555555555555')
+            self.assertAlmostEqual(rec0['mem_available_gib'], 112.0, places=2)
+
+    def test_capacity_checks_2582528_pool_floor_v136_log_kv_shard_and_failure(self):
+        v136_log = self.tmp / 'v136-start.log'
+        v136_log.write_text(
+            "info: kv pool: the engine's own and 3 more taking 5044 pages of 512 rows (15.76 GiB)\n"
+            f"info: glm: conversation states on disk in {LEARN}/0123456789abcdef "
+            "(2 states, 128 MiB of 65536 MiB; 2 ranks' parts; a save stages up to 512 MiB)\n"
+        )
+        fake = V136FakeEngine()
+        with Loopback(fake.respond) as srv:
+            cli('capacity', '--campaign', self.root, '--endpoint', srv.url, '--log', v136_log,
+                '--learn-gib', '64', '--check-learn-store')
+        res = evidence.verdict(self.root)
+        self.assertEqual(res['capacity']['status'], 'pass', res['capacity'])
+        self.assertEqual(res['capacity']['checks'][0]['pool_tokens'], 2_582_528)
+        self.assertEqual(res['capacity']['checks'][0]['learned_store']['ranks'], 2)
+
+        # kv_shard health format also passes offline when context is observed
+        shard_health = self.tmp / 'shard_health.json'
+        shard_health.write_text(json.dumps({
+            'status': 'ok', 'model': 'GLM-5.3-Flash', 'max_batch_size': 4, 'warming': False,
+            'context_length': 1_048_576,
+            'kv_shard': {'parts': 2, 'page_tokens': 512, 'part_pages': 2522},
+        }))
+        cli('capacity', '--campaign', self.root, '--health-file', shard_health)
+        self.assertEqual(evidence.verdict(self.root)['capacity']['status'], 'pass')
+
+        # Pool below 2,582,528 fails and rejects production
+        low_log = self.tmp / 'low.log'
+        low_log.write_text("info: kv pool: the engine's own and 3 more taking 5043 pages of 512 rows\n")
+        with Loopback(fake.respond) as srv:
+            with self.assertRaises(SystemExit) as exc:
+                cli('capacity', '--campaign', self.root, '--endpoint', srv.url, '--log', low_log)
+            self.assertEqual(exc.exception.code, 1)
+        failed = evidence.verdict(self.root)
+        self.assertEqual(failed['capacity']['status'], 'fail')
+        self.assertEqual(failed['production'], 'rejected')
+
+    def test_capacity_rejects_wrong_context_and_missing_store_log_and_accepts_keyed_minimal_health(self):
+        v136_log = self.tmp / 'v136-start.log'
+        v136_log.write_text(
+            "info: kv pool: the engine's own and 3 more taking 5044 pages of 512 rows (15.76 GiB)\n"
+            f"info: glm: conversation states on disk in {LEARN}/0123456789abcdef "
+            "(2 states, 128 MiB of 65536 MiB; 2 ranks' parts; a save stages up to 512 MiB)\n"
+        )
+        # 1. Wrong context (8192) must fail even with 4 lanes and 2,582,528 pool tokens
+        bad_ctx = self.tmp / 'bad_ctx'
+        cli('prepare', '--out', bad_ctx, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(context_length=8192).respond) as srv:
+            with self.assertRaises(SystemExit) as exc:
+                cli('capacity', '--campaign', bad_ctx, '--endpoint', srv.url, '--log', v136_log)
+            self.assertEqual(exc.exception.code, 1)
+        v_bad = evidence.verdict(bad_ctx)
+        self.assertEqual(v_bad['capacity']['status'], 'fail')
+        self.assertEqual(v_bad['capacity']['checks'][0]['observed_context'], 8192)
+
+        # 2. --check-learn-store without --log must fail instead of silently skipping
+        no_log = self.tmp / 'no_log'
+        cli('prepare', '--out', no_log, '--release', self.release, '--profile', self.profile)
+        shard_health = self.tmp / 'shard_ctx.json'
+        shard_health.write_text(json.dumps({
+            'status': 'ok', 'model': 'GLM-5.3-Flash', 'max_batch_size': 4, 'warming': False,
+            'context_length': 1_048_576,
+            'kv_shard': {'parts': 2, 'page_tokens': 512, 'part_pages': 2522},
+        }))
+        with self.assertRaises(SystemExit) as exc:
+            cli('capacity', '--campaign', no_log, '--health-file', shard_health, '--check-learn-store')
+        self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(evidence.verdict(no_log)['capacity']['status'], 'fail')
+
+        # 3. Keyed minimal /health ({"status": "ok"}) passes using /v1/models + startup log
+        keyed = self.tmp / 'keyed'
+        cli('prepare', '--out', keyed, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(keyed_minimal_health=True).respond) as srv:
+            cli('capacity', '--campaign', keyed, '--endpoint', srv.url, '--log', v136_log,
+                '--learn-gib', '64', '--check-learn-store')
+        v_keyed = evidence.verdict(keyed)
+        self.assertEqual(v_keyed['capacity']['status'], 'pass', v_keyed['capacity'])
+        self.assertEqual(v_keyed['capacity']['checks'][0]['streams'], 4)
+        self.assertEqual(v_keyed['capacity']['checks'][0]['observed_context'], 1_048_576)
+
+        # 4. HTTP 503 with healthy-looking JSON body must fail offline capacity verdict
+        cap503 = self.tmp / 'cap503'
+        cli('prepare', '--out', cap503, '--release', self.release, '--profile', self.profile)
+
+        def health_503(h):
+            body = json.dumps({
+                'status': 'ok', 'model': 'GLM-5.3-Flash', 'max_batch_size': 4, 'warming': False,
+                'context_length': 1_048_576, 'pool_tokens': 2_582_528,
+            }).encode()
+            return send(h, 503, 'application/json', body)
+
+        with Loopback(health_503) as srv:
+            with self.assertRaises(SystemExit):
+                cli('capacity', '--campaign', cap503, '--endpoint', srv.url)
+        v_503 = evidence.verdict(cap503)
+        self.assertEqual(v_503['capacity']['status'], 'fail', v_503['capacity'])
+        self.assertEqual(v_503['production'], 'rejected')
+
+    def test_host_state_pairing_is_per_target_enforces_chronology_and_reparses_meminfo(self):
+        meminfo = self.tmp / 'meminfo'
+        meminfo.write_text(
+            f'MemTotal: {128 * 1024 * 1024} kB\n'
+            f'MemAvailable: {110 * 1024 * 1024} kB\n'
+            'SwapTotal: 0 kB\nSwapFree: 0 kB\n'
+        )
+        # 1. Cross-rank pairing (rank0 fresh-boot + rank1 ordinary-relaunch) must NOT pass as paired
+        cli('record-host-state', '--campaign', self.root, '--boot-profile', 'fresh-boot',
+            '--boot-id', '11111111-2222-3333-4444-555555555555',
+            '--meminfo', meminfo, '--rank', 'rank0', '--host', 'spark-1')
+        cli('record-host-state', '--campaign', self.root, '--boot-profile', 'ordinary-relaunch',
+            '--boot-id', '22222222-2222-3333-4444-555555555555',
+            '--meminfo', meminfo, '--rank', 'rank1', '--host', 'spark-2')
+        cross = evidence.verdict(self.root, require_boot_pairing=True)
+        self.assertFalse(cross['host_state']['paired'])
+        self.assertEqual(cross['host_state']['status'], 'unknown')
+
+        # 2. Tampering with summary mem_available_gib in receipt is ignored because raw meminfo sidecar is re-parsed
+        rec_path = next((self.root / 'receipts').glob('*host-state-fresh-boot*.json'))
+        rec = json.loads(rec_path.read_text())
+        rec['mem_available_gib'] = 999.0
+        rec_path.write_text(json.dumps(rec))
+        reparsed = evidence.verdict(self.root)
+        self.assertAlmostEqual(reparsed['host_state']['records']['fresh-boot'][0]['mem_available_gib'], 110.0, places=2)
+
+        # 3. Inverted chronology on the same (host, rank, boot_id) fails host_state
+        inv_root = self.tmp / 'inv'
+        cli('prepare', '--out', inv_root, '--release', self.release, '--profile', self.profile)
+        cli('record-host-state', '--campaign', inv_root, '--boot-profile', 'ordinary-relaunch',
+            '--boot-id', '33333333-2222-3333-4444-555555555555',
+            '--meminfo', meminfo, '--rank', 'rank0', '--host', 'spark-1')
+        time.sleep(0.01)
+        cli('record-host-state', '--campaign', inv_root, '--boot-profile', 'fresh-boot',
+            '--boot-id', '33333333-2222-3333-4444-555555555555',
+            '--meminfo', meminfo, '--rank', 'rank0', '--host', 'spark-1')
+        inv = evidence.verdict(inv_root, require_boot_pairing=True)
+        self.assertEqual(inv['host_state']['status'], 'fail', inv['host_state'])
+        self.assertFalse(inv['host_state']['paired'])
+
+        # 4. Nonexistent --lifecycle-seq reference fails host_state
+        bad_lc = self.tmp / 'bad_lc'
+        cli('prepare', '--out', bad_lc, '--release', self.release, '--profile', self.profile)
+        cli('record-host-state', '--campaign', bad_lc, '--boot-profile', 'fresh-boot',
+            '--boot-id', '44444444-2222-3333-4444-555555555555',
+            '--meminfo', meminfo, '--rank', 'rank0', '--host', 'spark-1', '--lifecycle-seq', '999')
+        v_lc = evidence.verdict(bad_lc, require_boot_pairing=True)
+        self.assertEqual(v_lc['host_state']['status'], 'fail', v_lc['host_state'])
+        self.assertFalse(v_lc['host_state']['paired'])
+
+
+class DenseSparseGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release, self.profile, self.identity, _ = fixtures(self.tmp)
+        self.root = self.tmp / 'campaign'
+        cli('prepare', '--out', self.root, '--release', self.release, '--profile', self.profile)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_dense_2051_sparse_2052_page_reuse_and_restart_restore(self):
+        fake = V136FakeEngine(word_scale=1)
+        with Loopback(fake.respond) as srv:
+            cli('record-lifecycle', '--campaign', self.root, '--event', 'start', '--identity', self.identity)
+            cli('dense-sparse', '--campaign', self.root, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', self.root, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', self.root, '--endpoint', srv.url, '--case', 'page-reuse')
+            cli('record-lifecycle', '--campaign', self.root, '--event', 'restart', '--identity', self.identity)
+            cli('dense-sparse', '--campaign', self.root, '--endpoint', srv.url, '--case', 'restart-restore')
+
+        c = evidence.Campaign(self.root)
+        receipts = c.receipts()
+        sparse_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'sparse-2052')
+        restore_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'restart-restore')
+        restart_ev = next(r for r in receipts if r.get('kind') == 'lifecycle' and r.get('event') == 'restart')
+        t0 = evidence.when(sparse_rec['started_at']) - timedelta(seconds=10)
+        t_save = evidence.when(sparse_rec['ended_at']) + timedelta(milliseconds=1)
+        t_open = evidence.when(restart_ev['at'])
+        r_start, r_end = evidence.when(restore_rec['started_at']), evidence.when(restore_rec['ended_at'])
+        t_read = r_start + (r_end - r_start) / 2
+        log_path = self.tmp / 'rank0.log'
+        log_path.write_text(
+            f'{stamp(t0)} info: server listening\n'
+            f'{stamp(t_save)} info: imprint: 2052 tokens on disk: 2 new blocks and its own 12 MiB (12 MiB this state, 0 MiB of rows it shares) in 10 ms\n'
+            f"{stamp(t_open)} info: glm: conversation states on disk in {LEARN}/0123456789abcdef (1 states, 12 MiB of 65536 MiB; 2 ranks' parts; a save stages up to 256 MiB)\n"
+            f'{stamp(t_read)} info: imprint: read 2052 tokens from disk (12 MiB in 8 ms)\n'
+        )
+        cli('import-log', '--campaign', self.root, '--file', log_path)
+        verdict_ok = evidence.verdict(self.root, skew_s=0)
+        ds = verdict_ok['gates']['dense_sparse']
+        self.assertEqual(ds['status'], 'pass', ds)
+        self.assertEqual(ds['cases']['dense-2051']['measured_prompt_tokens'], 2051)
+        self.assertEqual(ds['cases']['sparse-2052']['measured_prompt_tokens'], 2052)
+        self.assertGreater(ds['cases']['page-reuse']['measured_prompt_tokens'], 2052)
+        self.assertEqual(ds['cases']['page-reuse']['reuse_scope'], 'in_memory_partial_page_4')
+        self.assertEqual(ds['cases']['page-reuse']['reuse_evidence'], 'usage.cached_tokens')
+        self.assertEqual(ds['cases']['restart-restore']['status'], 'pass')
+
+        # Cold prefill (covered log with no disk read) fails restart-restore
+        cold_root = self.tmp / 'cold'
+        shutil.copytree(self.root, cold_root)
+        # Replace imported log artifact & receipt cleanly via fresh copy before import-log
+        cold_log = self.tmp / 'cold.log'
+        cold_log.write_text(
+            f'{stamp(t0)} info: server listening\n'
+            f'{stamp(t_save)} info: imprint: 2052 tokens on disk: 2 new blocks and its own 12 MiB (12 MiB this state, 0 MiB of rows it shares) in 10 ms\n'
+        )
+        cold_only = self.tmp / 'cold_only'
+        cli('prepare', '--out', cold_only, '--release', self.release, '--profile', self.profile)
+        with Loopback(fake.respond) as srv:
+            cli('dense-sparse', '--campaign', cold_only, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', cold_only, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('record-lifecycle', '--campaign', cold_only, '--event', 'restart', '--identity', self.identity)
+            cli('dense-sparse', '--campaign', cold_only, '--endpoint', srv.url, '--case', 'restart-restore')
+        cold_log.write_text(f'{stamp(t0)} info: server listening\n')
+        cli('import-log', '--campaign', cold_only, '--file', cold_log)
+        v_cold = evidence.verdict(cold_only, skew_s=0)
+        self.assertEqual(v_cold['gates']['dense_sparse']['cases']['restart-restore']['status'], 'fail')
+        self.assertEqual(v_cold['production'], 'rejected')
+
+    def test_dense_sparse_partial_campaign_is_unknown_and_one_token_read_fails(self):
+        fake = V136FakeEngine(word_scale=1)
+        # 1. Partial campaign (only 2051 and 2052) must stay unknown, never pass
+        partial = self.tmp / 'partial_ds'
+        cli('prepare', '--out', partial, '--release', self.release, '--profile', self.profile)
+        with Loopback(fake.respond) as srv:
+            cli('dense-sparse', '--campaign', partial, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', partial, '--endpoint', srv.url, '--case', 'sparse-2052')
+        v_partial = evidence.verdict(partial, skew_s=0)
+        self.assertEqual(v_partial['gates']['dense_sparse']['status'], 'unknown')
+        self.assertEqual(v_partial['gates']['dense_sparse']['missing_required'], ['page-reuse', 'restart-restore'])
+
+        # 2. A 1-token disk read on restart-restore is below the 2048-token page floor and must fail
+        tiny = self.tmp / 'tiny_read_ds'
+        cli('prepare', '--out', tiny, '--release', self.release, '--profile', self.profile)
+        with Loopback(fake.respond) as srv:
+            cli('record-lifecycle', '--campaign', tiny, '--event', 'start', '--identity', self.identity)
+            cli('dense-sparse', '--campaign', tiny, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', tiny, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', tiny, '--endpoint', srv.url, '--case', 'page-reuse')
+            cli('record-lifecycle', '--campaign', tiny, '--event', 'restart', '--identity', self.identity)
+            cli('dense-sparse', '--campaign', tiny, '--endpoint', srv.url, '--case', 'restart-restore')
+        receipts = evidence.Campaign(tiny).receipts()
+        sparse_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'sparse-2052')
+        restore_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'restart-restore')
+        restart_ev = next(r for r in receipts if r.get('kind') == 'lifecycle' and r.get('event') == 'restart')
+        t0 = evidence.when(sparse_rec['started_at']) - timedelta(seconds=10)
+        t_save = evidence.when(sparse_rec['ended_at']) + timedelta(milliseconds=1)
+        t_open = evidence.when(restart_ev['at'])
+        t_read = evidence.when(restore_rec['started_at']) + (
+            evidence.when(restore_rec['ended_at']) - evidence.when(restore_rec['started_at'])
+        ) / 2
+        tiny_log = self.tmp / 'tiny.log'
+        tiny_log.write_text(
+            f'{stamp(t0)} info: server listening\n'
+            f'{stamp(t_save)} info: imprint: 2052 tokens on disk: 2 new blocks and its own 12 MiB (12 MiB this state, 0 MiB of rows it shares) in 10 ms\n'
+            f"{stamp(t_open)} info: glm: conversation states on disk in {LEARN}/0123456789abcdef (1 states, 12 MiB of 65536 MiB; 2 ranks' parts; a save stages up to 256 MiB)\n"
+            f'{stamp(t_read)} info: imprint: read 1 tokens from disk (1 MiB in 1 ms)\n'
+        )
+        cli('import-log', '--campaign', tiny, '--file', tiny_log)
+        v_tiny = evidence.verdict(tiny, skew_s=0)
+        self.assertEqual(v_tiny['gates']['dense_sparse']['cases']['restart-restore']['status'], 'fail')
+        self.assertEqual(v_tiny['gates']['dense_sparse']['status'], 'fail')
+
+    def test_dense_sparse_page_reuse_requires_attributable_reuse_evidence(self):
+        # 1. Full recomputation (cached_tokens=0) must FAIL page-reuse and never claim in_memory_partial_page_4
+        recomp = self.tmp / 'recomp_ds'
+        cli('prepare', '--out', recomp, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, no_cache_reuse=True).respond) as srv:
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', recomp, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_recomp = evidence.verdict(recomp, skew_s=0)
+        pr = v_recomp['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr['status'], 'fail', pr)
+        self.assertEqual(pr['reuse_scope'], 'unknown')
+        self.assertEqual(v_recomp['gates']['dense_sparse']['status'], 'fail')
+
+        # 1b. Exact 2048 cached_tokens (4 full pages, 0 tokens of partial page 4) must also FAIL page-reuse
+        boundary_2048 = self.tmp / 'boundary_2048_ds'
+        cli('prepare', '--out', boundary_2048, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, cached_tokens_override=2048).respond) as srv:
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', boundary_2048, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_2048 = evidence.verdict(boundary_2048, skew_s=0)
+        pr_2048 = v_2048['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_2048['status'], 'fail', pr_2048)
+        self.assertEqual(pr_2048['reuse_scope'], 'unknown')
+        self.assertEqual(pr_2048['floor_tokens'], 2049)
+
+        # 2. Missing reuse evidence (no cached_tokens and no disk read log) must FAIL with reuse_scope='unknown'
+        missing_ev = self.tmp / 'missing_ev_ds'
+        cli('prepare', '--out', missing_ev, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, omit_cached_tokens=True).respond) as srv:
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'dense-2051')
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'sparse-2052')
+            cli('dense-sparse', '--campaign', missing_ev, '--endpoint', srv.url, '--case', 'page-reuse')
+        v_miss = evidence.verdict(missing_ev, skew_s=0)
+        pr_miss = v_miss['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_miss['status'], 'fail', pr_miss)
+        self.assertEqual(pr_miss['reuse_scope'], 'unknown')
+
+        # 3. Importing an attributable disk read >= 2048 during page-reuse satisfies page-reuse via log.imprint_read
+        receipts = evidence.Campaign(missing_ev).receipts()
+        pr_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('case') == 'page-reuse')
+        t0 = evidence.when(pr_rec['started_at']) - timedelta(seconds=5)
+        t_read = evidence.when(pr_rec['started_at']) + (
+            evidence.when(pr_rec['ended_at']) - evidence.when(pr_rec['started_at'])
+        ) / 2
+        pr_log = self.tmp / 'pr_read.log'
+        pr_log.write_text(
+            f'{stamp(t0)} info: server listening\n'
+            f'{stamp(t_read)} info: imprint: read 2052 tokens from disk (12 MiB in 6 ms)\n'
+        )
+        cli('import-log', '--campaign', missing_ev, '--file', pr_log)
+        v_log = evidence.verdict(missing_ev, skew_s=0)
+        pr_log_res = v_log['gates']['dense_sparse']['cases']['page-reuse']
+        self.assertEqual(pr_log_res['status'], 'pass', pr_log_res)
+        self.assertEqual(pr_log_res['reuse_scope'], 'disk_partial_page_4')
+        self.assertEqual(pr_log_res['reuse_evidence'], 'log.imprint_read')
+
+
+class DurableImageGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release, self.profile, self.identity, _ = fixtures(self.tmp)
+        self.root = self.tmp / 'campaign'
+        cli('prepare', '--out', self.root, '--release', self.release, '--profile', self.profile)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _run_full_gate(self, root, fake, *, over_read_on=None, cold_ref_diverge=False, omit_swap_reads=False):
+        cold_fake = V136FakeEngine(word_scale=1, cold_instance=True, cold_ref_diverge=cold_ref_diverge)
+        with Loopback(fake.respond) as srv, Loopback(cold_fake.respond) as cold_srv:
+            cli('record-lifecycle', '--campaign', root, '--event', 'start', '--identity', self.identity)
+            cli('image-durable', '--campaign', root, '--endpoint', srv.url, '--phase', 'initial', '--target-tokens', '4096')
+            cli('record-lifecycle', '--campaign', root, '--event', 'restart', '--identity', self.identity)
+            cli('image-durable', '--campaign', root, '--endpoint', srv.url, '--phase', 'restart')
+            cli('image-durable', '--campaign', root, '--endpoint', cold_srv.url, '--phase', 'cold-ref')
+            cli('image-durable', '--campaign', root, '--endpoint', srv.url, '--phase', 'mid-cut')
+            cli('image-durable', '--campaign', root, '--endpoint', srv.url, '--phase', 'swap-pixel')
+            cli('image-durable', '--campaign', root, '--endpoint', srv.url, '--phase', 'swap-geometry')
+
+        c = evidence.Campaign(root)
+        receipts = c.receipts()
+        init_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('phase') == 'initial')
+        restart_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('phase') == 'restart')
+        pre_img2_tok = next(r['count'] for r in receipts if r.get('kind') == 'tokenize' and r.get('purpose') == 'pre-image2-prefix')
+        restart_ev = next(r for r in receipts if r.get('kind') == 'lifecycle' and r.get('event') == 'restart')
+        t0 = evidence.when(init_rec['started_at']) - timedelta(seconds=10)
+        lines = [
+            (t0, 'info: server listening'),
+            (evidence.when(init_rec['ended_at']) + timedelta(milliseconds=1),
+             f'info: imprint: {init_rec["measured_prompt_tokens"]} tokens on disk: 4 new blocks and its own 24 MiB (24 MiB this state, 0 MiB of rows it shares) in 12 ms'),
+            (evidence.when(restart_ev['at']),
+             f"info: glm: conversation states on disk in {LEARN}/0123456789abcdef (1 states, 24 MiB of 65536 MiB; 2 ranks' parts; a save stages up to 256 MiB)"),
+            (evidence.when(restart_rec['started_at']) + (evidence.when(restart_rec['ended_at']) - evidence.when(restart_rec['started_at'])) / 2,
+             f'info: imprint: read {init_rec["measured_prompt_tokens"]} tokens from disk (24 MiB in 9 ms)'),
+        ]
+        if not omit_swap_reads:
+            for phase in ('swap-pixel', 'swap-geometry'):
+                srec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('phase') == phase)
+                mid_ts = evidence.when(srec['started_at']) + (evidence.when(srec['ended_at']) - evidence.when(srec['started_at'])) / 2
+                read_n = (pre_img2_tok + 128) if over_read_on == phase else pre_img2_tok
+                lines.append((mid_ts, f'info: imprint: read {read_n} tokens from disk (6 MiB in 4 ms)'))
+
+        log_path = root.parent / f'{root.name}.log'
+        log_path.write_text(''.join(f'{stamp(ts)} {text}\n' for ts, text in sorted(lines)))
+        cli('import-log', '--campaign', root, '--file', log_path, '--label', 'rank0-primary')
+        cold_rec = next(r for r in receipts if r.get('kind') == 'gate' and r.get('phase') == 'cold-ref')
+        cold_log = root.parent / f'{root.name}-cold.log'
+        cold_log.write_text(f'{stamp(evidence.when(cold_rec["started_at"]) - timedelta(seconds=1))} info: cold server listening\n')
+        cli('import-log', '--campaign', root, '--file', cold_log, '--label', 'rank0-cold-ref')
+        return evidence.verdict(root, skew_s=0)
+
+    def test_durable_two_image_gate_passes_all_six_phases(self):
+        v = self._run_full_gate(self.root, V136FakeEngine(word_scale=1))
+        ig = v['gates']['image_durable']
+        self.assertEqual(ig['status'], 'pass', ig)
+        self.assertTrue(ig['restart_matches_cold_prefill'])
+        for phase in gates.DURABLE_IMAGE_PHASES:
+            self.assertEqual(ig['phases'][phase]['status'], 'pass', ig['phases'][phase])
+        self.assertGreater(ig['phases']['initial']['measured_prompt_tokens'], gates.SPARSE_MIN_VISIBLE)
+
+    def test_swap_pixel_and_geometry_fail_if_prefix_reuse_crosses_image2_boundary(self):
+        for bad_phase in ('swap-pixel', 'swap-geometry'):
+            with self.subTest(bad_phase=bad_phase):
+                root = self.tmp / f'over-{bad_phase}'
+                cli('prepare', '--out', root, '--release', self.release, '--profile', self.profile)
+                v = self._run_full_gate(root, V136FakeEngine(word_scale=1), over_read_on=bad_phase)
+                self.assertEqual(v['gates']['image_durable']['phases'][bad_phase]['status'], 'fail')
+                self.assertEqual(v['production'], 'rejected')
+
+    def test_cold_divergence_and_image2_aliasing_both_fail_gate(self):
+        root_div = self.tmp / 'div'
+        cli('prepare', '--out', root_div, '--release', self.release, '--profile', self.profile)
+        v_div = self._run_full_gate(root_div, V136FakeEngine(word_scale=1), cold_ref_diverge=True)
+        self.assertFalse(v_div['gates']['image_durable']['restart_matches_cold_prefill'])
+        self.assertEqual(v_div['gates']['image_durable']['status'], 'fail')
+
+        root_alias = self.tmp / 'alias'
+        cli('prepare', '--out', root_alias, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, alias_swap_image2=True).respond) as srv:
+            cli('image-durable', '--campaign', root_alias, '--endpoint', srv.url, '--phase', 'initial', '--target-tokens', '4096')
+            with self.assertRaises(SystemExit) as exc:
+                cli('image-durable', '--campaign', root_alias, '--endpoint', srv.url, '--phase', 'swap-pixel')
+            self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(evidence.verdict(root_alias, skew_s=0)['gates']['image_durable']['status'], 'fail')
+
+    def test_image_durable_partial_unknown_warm_cold_ref_fails_and_absent_swap_read_unknown(self):
+        # 1. Only running initial cannot pass image-durable
+        partial = self.tmp / 'partial_img'
+        cli('prepare', '--out', partial, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1).respond) as srv:
+            cli('image-durable', '--campaign', partial, '--endpoint', srv.url, '--phase', 'initial', '--target-tokens', '4096')
+        v_partial = evidence.verdict(partial, skew_s=0)
+        self.assertEqual(v_partial['gates']['image_durable']['status'], 'unknown')
+        self.assertTrue(v_partial['gates']['image_durable']['missing_phases'])
+
+        # 2. Running cold-ref against the SAME warm endpoint fails
+        warm_ref = self.tmp / 'warm_ref'
+        cli('prepare', '--out', warm_ref, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1).respond) as srv:
+            cli('record-lifecycle', '--campaign', warm_ref, '--event', 'start', '--identity', self.identity)
+            cli('image-durable', '--campaign', warm_ref, '--endpoint', srv.url, '--phase', 'initial', '--target-tokens', '4096')
+            cli('record-lifecycle', '--campaign', warm_ref, '--event', 'restart', '--identity', self.identity)
+            cli('image-durable', '--campaign', warm_ref, '--endpoint', srv.url, '--phase', 'restart')
+            cli('image-durable', '--campaign', warm_ref, '--endpoint', srv.url, '--phase', 'cold-ref')
+        v_warm = evidence.verdict(warm_ref, skew_s=0)
+        self.assertEqual(v_warm['gates']['image_durable']['phases']['cold-ref']['status'], 'fail')
+        self.assertFalse(v_warm['gates']['image_durable']['phases']['cold-ref']['cold_instance_isolated'])
+
+        # 3. Absent swap reuse trace leaves swap phases unknown, never pass
+        no_swap = self.tmp / 'no_swap_reads'
+        cli('prepare', '--out', no_swap, '--release', self.release, '--profile', self.profile)
+        v_noswap = self._run_full_gate(no_swap, V136FakeEngine(word_scale=1), omit_swap_reads=True)
+        self.assertEqual(v_noswap['gates']['image_durable']['phases']['swap-pixel']['status'], 'unknown')
+        self.assertEqual(v_noswap['gates']['image_durable']['phases']['swap-geometry']['status'], 'unknown')
+        self.assertEqual(v_noswap['gates']['image_durable']['status'], 'unknown')
+
+        # 4. A later clean cold-ref retry cannot erase an earlier restart/cold-ref divergence
+        retry_div = self.tmp / 'retry_div'
+        cli('prepare', '--out', retry_div, '--release', self.release, '--profile', self.profile)
+        self._run_full_gate(retry_div, V136FakeEngine(word_scale=1), cold_ref_diverge=True)
+        with Loopback(V136FakeEngine(word_scale=1, cold_instance=True).respond) as clean_cold:
+            cli('image-durable', '--campaign', retry_div, '--endpoint', clean_cold.url, '--phase', 'cold-ref')
+        v_retry_div = evidence.verdict(retry_div, skew_s=0)
+        self.assertFalse(v_retry_div['gates']['image_durable']['restart_matches_cold_prefill'])
+        self.assertEqual(v_retry_div['gates']['image_durable']['status'], 'fail')
+
+
+class ReasoningMatrixGateTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release, self.profile, _, _ = fixtures(self.tmp)
+        self.root = self.tmp / 'campaign'
+        cli('prepare', '--out', self.root, '--release', self.release, '--profile', self.profile)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_clear_thinking_0_and_max_high_low_none_efforts_pass(self):
+        with Loopback(V136FakeEngine(word_scale=1).respond) as srv:
+            cli('reasoning-matrix', '--campaign', self.root, '--endpoint', srv.url)
+        v = evidence.verdict(self.root, skew_s=0)
+        rm = v['gates']['reasoning_matrix']
+        self.assertEqual(rm['status'], 'pass', rm)
+        self.assertTrue(rm['distinct_renders'])
+        for effort in ('max', 'high', 'low'):
+            pair = rm['clear_thinking_tokens'][effort]
+            self.assertGreater(pair['clear-thinking-with'], pair['clear-thinking-without'])
+
+    def test_clear_thinking_strip_or_effort_collapse_fails(self):
+        for label, kwargs in (
+            ('stripped', {'strip_reasoning_in_tokenize': True}),
+            ('collapsed', {'collapse_efforts': True}),
+        ):
+            with self.subTest(label=label):
+                root = self.tmp / label
+                cli('prepare', '--out', root, '--release', self.release, '--profile', self.profile)
+                with Loopback(V136FakeEngine(word_scale=1, **kwargs).respond) as srv:
+                    cli('reasoning-matrix', '--campaign', root, '--endpoint', srv.url)
+                v = evidence.verdict(root, skew_s=0)
+                self.assertEqual(v['gates']['reasoning_matrix']['status'], 'fail', v['gates']['reasoning_matrix'])
+                self.assertEqual(v['production'], 'rejected')
+
+    def test_reasoning_matrix_rejects_none_reasoning_uses_identical_render_prompt_and_marks_subset_unknown(self):
+        # 1. Identical messages across all 4 effort-render probes so ignoring reasoning_effort cannot pass
+        plan = evidence.Campaign(self.root).plan
+        render_msgs = [gates.reasoning_render_body(plan, eff)['messages'] for eff in gates.REASONING_EFFORTS]
+        self.assertEqual(len({json.dumps(m, sort_keys=True) for m in render_msgs}), 1)
+
+        # 2. Effort 'none' emitting reasoning_content must fail
+        bad_none = self.tmp / 'bad_none'
+        cli('prepare', '--out', bad_none, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, bad_none_reasoning=True).respond) as srv:
+            cli('reasoning-matrix', '--campaign', bad_none, '--endpoint', srv.url)
+        v_none = evidence.verdict(bad_none, skew_s=0)
+        self.assertEqual(v_none['gates']['reasoning_matrix']['status'], 'fail', v_none['gates']['reasoning_matrix'])
+        self.assertEqual(v_none['gates']['reasoning_matrix']['efforts']['none']['status'], 'fail')
+
+        # 3. Missing efforts / missing render receipts leave reasoning-matrix unknown
+        subset = self.tmp / 'subset_rm'
+        cli('prepare', '--out', subset, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1).respond) as srv:
+            cli('reasoning-matrix', '--campaign', subset, '--endpoint', srv.url, '--efforts', 'max,high')
+        v_sub = evidence.verdict(subset, skew_s=0)
+        self.assertEqual(v_sub['gates']['reasoning_matrix']['status'], 'unknown')
+        self.assertEqual(v_sub['gates']['reasoning_matrix']['missing_renders'], ['low', 'none'])
+        self.assertEqual(v_sub['gates']['reasoning_matrix']['missing_efforts'], ['low', 'none'])
+
+        # 4. A later clean reasoning-matrix retry cannot erase an earlier collapsed render
+        retry_rm = self.tmp / 'retry_rm'
+        cli('prepare', '--out', retry_rm, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=1, collapse_efforts=True).respond) as bad_srv:
+            cli('reasoning-matrix', '--campaign', retry_rm, '--endpoint', bad_srv.url)
+        with Loopback(V136FakeEngine(word_scale=1).respond) as good_srv:
+            cli('reasoning-matrix', '--campaign', retry_rm, '--endpoint', good_srv.url)
+        v_rrm = evidence.verdict(retry_rm, skew_s=0)
+        self.assertEqual(v_rrm['gates']['reasoning_matrix']['status'], 'fail', v_rrm['gates']['reasoning_matrix'])
+
+
+class CodingReplayAndConcurrencyTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release, self.profile, _, _ = fixtures(self.tmp)
+        self.root = self.tmp / 'campaign'
+        cli('prepare', '--out', self.root, '--release', self.release, '--profile', self.profile)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_coding_replay_40k_262k_and_cold_prefill_concurrent_pass(self):
+        fake = V136FakeEngine(word_scale=400, chunk_delay_s=0.02)
+        with Loopback(fake.respond) as srv:
+            cli('coding-replay', '--campaign', self.root, '--endpoint', srv.url, '--shape', '40k', '--turns', '3')
+            cli('coding-replay', '--campaign', self.root, '--endpoint', srv.url, '--shape', '262k', '--turns', '2')
+            cli('coding-replay', '--campaign', self.root, '--endpoint', srv.url, '--shape', 'cold-prefill-concurrent')
+        v = evidence.verdict(self.root, skew_s=0)
+        perf = v['performance']
+        self.assertEqual(perf['status'], 'pass', perf)
+        self.assertGreaterEqual(perf['coding_replay']['40k']['turns'][0]['measured_prompt_tokens'], 40_960)
+        self.assertEqual(len(perf['coding_replay']['40k']['turns']), 3)
+        self.assertGreaterEqual(perf['coding_replay']['262k']['turns'][0]['measured_prompt_tokens'], 262_144)
+        cold_rep = perf['coding_replay']['cold-prefill-concurrent']
+        self.assertFalse(cold_rep['decoder_starved'])
+        self.assertTrue(cold_rep['overlapped'])
+        self.assertTrue(cold_rep['launched_after_decoder_first_event'])
+        self.assertGreater(cold_rep['active_decode_overlap_s'], 0.0)
+        self.assertEqual(cold_rep['parts']['concurrent']['timing_basis'], 'sse_event_arrival')
+
+    def test_cold_prefill_concurrent_detects_decoder_starvation(self):
+        fake = V136FakeEngine(word_scale=400, stall_s=0.18, stall_on_substring='MOD_DEC_CONCURRENT_')
+        with Loopback(fake.respond) as srv:
+            cli('coding-replay', '--campaign', self.root, '--endpoint', srv.url,
+                '--shape', 'cold-prefill-concurrent', '--starvation-ms', '80')
+        v = evidence.verdict(self.root, skew_s=0)
+        rep = v['performance']['coding_replay']['cold-prefill-concurrent']
+        self.assertTrue(rep['decoder_starved'])
+        self.assertGreater(rep['max_stall_ms'], 80.0)
+        self.assertEqual(rep['status'], 'fail')
+        self.assertEqual(v['production'], 'rejected')
+
+    def test_cold_prefill_detects_ttft_starvation_and_per_sse_event_timings(self):
+        # 1. Pre-first-token delay (server holding decoder before first SSE token) must fail via TTFT starvation
+        ttft_root = self.tmp / 'ttft_starved'
+        cli('prepare', '--out', ttft_root, '--release', self.release, '--profile', self.profile)
+        fake_ttft = V136FakeEngine(word_scale=400, first_token_delay_s=0.14, chunk_delay_s=0.02,
+                                   stall_on_substring='MOD_DEC_CONCURRENT_')
+        with Loopback(fake_ttft.respond) as srv:
+            cli('coding-replay', '--campaign', ttft_root, '--endpoint', srv.url,
+                '--shape', 'cold-prefill-concurrent', '--starvation-ms', '60')
+        v_ttft = evidence.verdict(ttft_root, skew_s=0)
+        rep = v_ttft['performance']['coding_replay']['cold-prefill-concurrent']
+        self.assertTrue(rep['decoder_starved'])
+        self.assertTrue(rep['parts']['concurrent']['ttft_starved'])
+        self.assertEqual(rep['status'], 'fail')
+
+        # 2. Multiple SSE events packed in a single socket write record one timestamp per content SSE event
+        def packed_sse(h):
+            h.send_response(200)
+            h.send_header('Content-Type', 'text/event-stream')
+            h.end_headers()
+            payload = b''.join(sse(item) for item in (
+                event({'role': 'assistant'}),
+                event({'content': 'a'}),
+                event({'content': 'b'}),
+                event({'content': 'c'}),
+                event({}, 'stop'),
+                {'choices': [], 'usage': {'prompt_tokens': 5, 'completion_tokens': 3, 'total_tokens': 8}},
+                b'[DONE]',
+            ))
+            h.wfile.write(payload)
+            h.wfile.flush()
+
+        with Loopback(packed_sse) as srv:
+            res = transport.exchange(srv.url, 'POST', '/v1/chat/completions', b'{}', 5.0, stream=True)
+        self.assertTrue(res['complete'])
+        self.assertEqual(len(res['event_times_s']), 3)
+        self.assertEqual(res['stream_profile']['timing_basis'], 'sse_event_arrival')
+        self.assertIsNotNone(res['first_event_mono_s'])
+        self.assertIsNotNone(res['last_event_mono_s'])
+
+        # 3. Offline cold-prefill evaluator rejects missing first-event timestamps, early launch, and post-event teardown overlap
+        base_ok = self.tmp / 'cold_overlap_unit'
+        cli('prepare', '--out', base_ok, '--release', self.release, '--profile', self.profile)
+        with Loopback(V136FakeEngine(word_scale=400, chunk_delay_s=0.02).respond) as srv:
+            cli('coding-replay', '--campaign', base_ok, '--endpoint', srv.url, '--shape', 'cold-prefill-concurrent')
+        c = evidence.Campaign(base_ok)
+        rec = next(r for r in c.receipts() if r.get('kind') == 'coding-replay')
+        measures = {}
+        for r in c.receipts():
+            if r.get('kind') == 'tokenize' and r.get('purpose') == 'measure' and 'request' in r.get('sidecars', {}):
+                measures[('measure', transport.sha256(c.sidecar(r, 'request')))] = evidence.tokenize_result(
+                    c.sidecar(r, 'response')
+                )
+
+        # (a) Prefill launched before decoder first event
+        r_early = json.loads(json.dumps(rec))
+        r_early['launched_after_decoder_first_event'] = False
+        ev_early = coding._eval_cold_concurrent(c, c.plan, r_early, measures, starvation_ms=2000.0)
+        self.assertEqual(ev_early['status'], 'fail')
+
+        # (b) Missing first_event_mono_s cannot pass overlap check
+        r_missing = json.loads(json.dumps(rec))
+        r_missing['concurrent_decoder']['first_event_mono_s'] = None
+        ev_missing = coding._eval_cold_concurrent(c, c.plan, r_missing, measures, starvation_ms=2000.0)
+        self.assertEqual(ev_missing['status'], 'fail')
+        self.assertFalse(ev_missing['overlapped'])
+
+        # (c) Overlap only during post-last-event teardown (after last_event_mono_s) must fail
+        r_teardown = json.loads(json.dumps(rec))
+        r_teardown['concurrent_decoder']['first_event_mono_s'] = 100.0
+        r_teardown['concurrent_decoder']['last_event_mono_s'] = 101.0
+        r_teardown['concurrent_decoder']['mono_end_s'] = 105.0
+        r_teardown['cold_prefill']['mono_start_s'] = 102.0
+        r_teardown['cold_prefill']['mono_end_s'] = 104.0
+        ev_teardown = coding._eval_cold_concurrent(c, c.plan, r_teardown, measures, starvation_ms=2000.0)
+        self.assertEqual(ev_teardown['status'], 'fail')
+        self.assertFalse(ev_teardown['overlapped'])
+
+    def test_concurrency_1_2_3_4_pi_buckets_and_starvation_reporting(self):
+        fake = V136FakeEngine(word_scale=1, chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_')
+        with Loopback(fake.respond) as srv:
+            cli('concurrency', '--campaign', self.root, '--endpoint', srv.url, '--levels', '1,2,3,4', '--chunks', '1')
+        v = evidence.verdict(self.root, skew_s=0)
+        conc = v['performance']['concurrency']
+        self.assertEqual(conc['status'], 'pass', conc)
+        self.assertEqual(set(conc['levels']), {'1', '2', '3', '4'})
+        self.assertEqual(set(conc['pi_buckets']), {'C1', 'C2-C3', 'C4'})
+        self.assertEqual(conc['pi_buckets']['C2-C3']['levels'], [2, 3])
+        self.assertTrue(all(b['all_passed'] for b in conc['pi_buckets'].values()))
+        self.assertEqual(conc['levels']['4']['max_concurrent_streams'], 4)
+        self.assertEqual(conc['levels']['4']['max_concurrent_decode_streams'], 4)
+        self.assertGreater(conc['levels']['4']['shared_elapsed_s'], 0.0)
+
+        # Inject starvation on one of the 4 concurrent streams
+        starved_root = self.tmp / 'starved-c4'
+        cli('prepare', '--out', starved_root, '--release', self.release, '--profile', self.profile)
+        stalled_fake = V136FakeEngine(
+            word_scale=1, stall_s=0.15, stall_on_substring='MOD_CONC_C4_S2_',
+            chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_',
+        )
+        with Loopback(stalled_fake.respond) as srv:
+            cli('concurrency', '--campaign', starved_root, '--endpoint', srv.url,
+                '--levels', '1,2,3,4', '--chunks', '1', '--starvation-ms', '60')
+        vs = evidence.verdict(starved_root, skew_s=0)
+        cs = vs['performance']['concurrency']
+        self.assertEqual(cs['status'], 'fail')
+        self.assertEqual(cs['levels']['4']['starved_streams'], 1)
+        self.assertFalse(cs['pi_buckets']['C4']['all_passed'])
+        self.assertGreater(cs['pi_buckets']['C4']['worst_itl_max_ms'], 60.0)
+
+    def test_concurrency_fails_when_four_streams_are_disjoint_serial(self):
+        fake = V136FakeEngine(word_scale=1, chunk_delay_s=0.02, chunk_delay_on_substring='MOD_CONC_')
+        with Loopback(fake.respond) as srv:
+            cli('concurrency', '--campaign', self.root, '--endpoint', srv.url, '--levels', '4', '--chunks', '1')
+        c = evidence.Campaign(self.root)
+        rec = next(r for r in c.receipts() if r.get('kind') == 'concurrency' and r.get('concurrency') == 4)
+        serial_rec = json.loads(json.dumps(rec))
+        # Rewrite intervals to 4 completely disjoint 1-second serial windows: [10..11], [11..12], [12..13], [13..14]
+        for idx, sinfo in enumerate(serial_rec['streams']):
+            t0 = 10.0 + idx * 1.0
+            sinfo['mono_start_s'] = t0
+            sinfo['first_event_mono_s'] = t0 + 0.0
+            sinfo['last_event_mono_s'] = t0 + 1.0
+            sinfo['mono_end_s'] = t0 + 1.0
+        res = coding._eval_concurrency(c, c.plan, [serial_rec])
+        lvl4 = res['levels']['4']
+        self.assertEqual(lvl4['status'], 'fail', lvl4)
+        self.assertEqual(lvl4['max_concurrent_streams'], 1)
+        self.assertEqual(lvl4['max_concurrent_decode_streams'], 1)
+        # 4 streams * 12 completion tokens = 48 tokens over 4.0s shared span => 12.0 tok/s (not 4 * 12 = 48)
+        self.assertAlmostEqual(lvl4['shared_elapsed_s'], 4.0, places=3)
+        self.assertAlmostEqual(lvl4['aggregate_decode_tok_s'], 12.0, places=3)
+        self.assertTrue(any('concurrent' in r for r in lvl4['reasons']), lvl4['reasons'])
+
+        # Missing decode timings on 1 of 4 streams must FAIL level 4 and fall back to shared wall elapsed time
+        missing_dec = json.loads(json.dumps(rec))
+        for idx, sinfo in enumerate(missing_dec['streams']):
+            sinfo['mono_start_s'] = 10.0
+            sinfo['mono_end_s'] = 14.0
+            if idx == 3:
+                sinfo['first_event_mono_s'] = None
+                sinfo['last_event_mono_s'] = None
+                sinfo['event_times_s'] = []
+                sinfo['token_times_s'] = []
+            else:
+                sinfo['first_event_mono_s'] = 10.5
+                sinfo['last_event_mono_s'] = 11.5
+        res_miss = coding._eval_concurrency(c, c.plan, [missing_dec])
+        lvl4_miss = res_miss['levels']['4']
+        self.assertEqual(lvl4_miss['status'], 'fail', lvl4_miss)
+        self.assertEqual(lvl4_miss['max_concurrent_decode_streams'], 3)
+        # Must use shared_wall_s (4.0s), NOT the 3-stream shared_decode_s (1.0s)
+        self.assertAlmostEqual(lvl4_miss['shared_elapsed_s'], 4.0, places=3)
+        self.assertAlmostEqual(lvl4_miss['aggregate_decode_tok_s'], 12.0, places=3)
+        self.assertTrue(any('decode timing' in r for r in lvl4_miss['reasons']), lvl4_miss['reasons'])
 
 
 if __name__ == '__main__':
