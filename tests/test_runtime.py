@@ -151,7 +151,10 @@ class ContractTest(unittest.TestCase):
             {"GLM_LEARN_DIR": "/cache/huggingface/tensorfold-spill/run"},
             {"GLM_LEARN_DIR": "/tmp/outside-root"},
             {"GLM_LEARN_GIB": "0"},
-            {"TF_GLM_REQUEST_STARTS": "1"},
+            {"TF_KV_SHARE": "16"},
+            {"GLM_LEARN_ENABLED": "0", "TF_KV_SHARE": "16", "TF_GLM_REQUEST_STARTS": "1"},
+            {"TF_KV_SHARE": "bogus"},
+            {"VISION_VIDEO_TOKENS": "16"},
             {"EXTRA_ARGS": "--context 128"},
             {"NCCL_IB_HCA": "", "TF_ROCE_HCA": ""},
             {"TF_KV_PAGES": "bogus"},
@@ -211,6 +214,31 @@ class ContractTest(unittest.TestCase):
         link_dir.symlink_to(outside)
         with self.assertRaisesRegex(ValueError, "symlink"):
             contract.build_launch_spec(dict(base, GLM_LEARN_DIR=str(link_dir)), sysfs_ib_dir=self.sysfs)
+
+    def test_p3_knobs_and_vision_video_tokens_pass_through_with_learn_conversations(self):
+        env = _base_env(self.tmp, rank="0")
+        env.update(
+            GLM_LEARN_ENABLED="1",
+            TF_KV_SHARE="0",
+            TF_GLM_REQUEST_STARTS="1",
+            TF_GLM_MULTI_PREFILL="1",
+            TF_GLM_ROCE_FUSE="1",
+            TF_GLM_PRICED_WINDOWS="1",
+            VISION_VIDEO_TOKENS="64",
+        )
+        spec = contract.build_launch_spec(env, sysfs_ib_dir=self.sysfs)
+        for knob in ("TF_GLM_REQUEST_STARTS", "TF_GLM_MULTI_PREFILL", "TF_GLM_ROCE_FUSE", "TF_GLM_PRICED_WINDOWS"):
+            self.assertEqual(spec.env[knob], "1")
+        self.assertIn("--learn-conversations", spec.argv)
+        idx = spec.argv.index("--vision-video-tokens")
+        self.assertEqual(spec.argv[idx + 1], "64")
+
+        # Also verify explicit --vision-video-tokens via EXTRA_ARGS is not blocked.
+        env_extra = _base_env(self.tmp, rank="0")
+        env_extra.update(ALLOW_EXTRA_ARGS="1", EXTRA_ARGS="--vision-video-tokens 64")
+        spec_extra = contract.build_launch_spec(env_extra, sysfs_ib_dir=self.sysfs)
+        idx2 = spec_extra.argv.index("--vision-video-tokens")
+        self.assertEqual(spec_extra.argv[idx2 + 1], "64")
 
 
 class MemGuardTest(unittest.TestCase):

@@ -475,6 +475,18 @@ def build_launch_spec(
     top_k = _int_env(env, "TOP_K", 20, minimum=0, maximum=1000)
     vision_enabled = _bool_env(env, "VISION_ENABLED", True)
     vision_max_images = _int_env(env, "VISION_MAX_IMAGES", 50, minimum=1, maximum=500)
+    vision_video_tokens_raw = (env.get("VISION_VIDEO_TOKENS") or "").strip()
+    vision_video_tokens = (
+        _int_env(
+            {"VISION_VIDEO_TOKENS": vision_video_tokens_raw},
+            "VISION_VIDEO_TOKENS",
+            64,
+            minimum=64,
+            maximum=262_144,
+        )
+        if vision_video_tokens_raw
+        else None
+    )
     thinking_enabled = _bool_env(env, "THINKING_ENABLED", True)
     dashboard_enabled = _bool_env(env, "DASHBOARD_ENABLED", True)
 
@@ -490,10 +502,17 @@ def build_launch_spec(
     if clear_thinking not in ("0", "1"):
         raise ValueError(f"TF_GLM_CLEAR_THINKING must be '0' or '1', got {clear_thinking!r}")
 
-    if mounts.learn_enabled and (env.get("TF_GLM_REQUEST_STARTS") or "").strip() == "1":
-        raise ValueError(
-            "TF_GLM_REQUEST_STARTS=1 is mutually exclusive with --learn-conversations (GLM_LEARN_ENABLED=1)"
-        )
+    kv_share_raw = (env.get("TF_KV_SHARE") or "").strip()
+    kv_share = _int_env({"TF_KV_SHARE": kv_share_raw or "0"}, "TF_KV_SHARE", 0, minimum=0, maximum=4096)
+    if kv_share > 0:
+        if mounts.learn_enabled:
+            raise ValueError(
+                "TF_KV_SHARE>0 is incompatible with --learn-conversations (GLM_LEARN_ENABLED=1)"
+            )
+        if (env.get("TF_GLM_REQUEST_STARTS") or "").strip() == "1":
+            raise ValueError(
+                "TF_KV_SHARE>0 is incompatible with TF_GLM_REQUEST_STARTS=1"
+            )
 
     reasoning_effort = (env.get("REASONING_EFFORT") or "xhigh").strip().lower()
     if reasoning_effort not in VALID_EFFORTS:
@@ -602,6 +621,8 @@ def build_launch_spec(
         argv.append("--dashboard")
     if vision_enabled:
         argv += ["--vision", "--vision-max-images", str(vision_max_images)]
+        if vision_video_tokens is not None:
+            argv += ["--vision-video-tokens", str(vision_video_tokens)]
     if mounts.chat_template is not None:
         argv += ["--chat-template", str(mounts.chat_template)]
     if mounts.drafter is not None:
